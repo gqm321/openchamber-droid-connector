@@ -1,5 +1,5 @@
 /**
- * HTTP + SSE server exposing the OpenCode API subset (M1) backed by pi.
+ * HTTP + SSE server exposing the OpenCode API subset (M1) backed by Droid.
  */
 
 import { createServer, type IncomingMessage, type ServerResponse, type Server } from "node:http";
@@ -20,7 +20,7 @@ import {
 } from "./v2.js";
 import type { OCEvent, OCModelRef, OCPromptBody, OCSession } from "./types.js";
 
-const DEBUG_LOG = process.env.OCPI_DEBUG_LOG ?? "/tmp/openchamber-pi-debug.log";
+const DEBUG_LOG = process.env.OCDROID_DEBUG_LOG ?? "/tmp/openchamber-droid-debug.log";
 
 // This connector is not opencode — it only implements an OpenCode API subset.
 // OpenChamber reads /global/health's `version` as the installed opencode version
@@ -28,8 +28,8 @@ const DEBUG_LOG = process.env.OCPI_DEBUG_LOG ?? "/tmp/openchamber-pi-debug.log";
 // contract version (1.18.31) made every adapter profile look permanently
 // outdated, and the resulting "update" then failed with "Unknown installation
 // method". Report no version so upgrade-status returns available:null and the UI
-// shows no prompt. Set OCPI_OPENCODE_COMPAT_VERSION to advertise one on purpose.
-const OPENCODE_COMPAT_VERSION = process.env.OCPI_OPENCODE_COMPAT_VERSION?.trim() || null;
+// shows no prompt. Set OCDROID_OPENCODE_COMPAT_VERSION to advertise one on purpose.
+const OPENCODE_COMPAT_VERSION = process.env.OCDROID_OPENCODE_COMPAT_VERSION?.trim() || null;
 
 /**
  * `archived` list filter per SDK v2 (`boolean | "true" | "false"`):
@@ -42,7 +42,7 @@ function applyArchivedFilter(sessions: OCSession[], archived: string | null) {
 }
 
 function debugLog(line: string): void {
-  if (process.env.OCPI_DEBUG) appendFileSync(DEBUG_LOG, line + "\n");
+  if (process.env.OCDROID_DEBUG) appendFileSync(DEBUG_LOG, line + "\n");
 }
 
 function numberParam(value: string | null): number | undefined {
@@ -82,7 +82,7 @@ export class AdapterServer {
 
   private catalog(): Promise<Catalog> {
     this.catalogPromise ??= loadCatalog(this.options.defaultDirectory).catch((err) => {
-      console.error("[catalog] failed to load models from pi:", err);
+      console.error("[catalog] failed to load models from droid:", err);
       return { providers: [], defaults: {} };
     });
     return this.catalogPromise;
@@ -212,7 +212,7 @@ export class AdapterServer {
     if ((method === "POST" || method === "GET") && path === "/global/upgrade") {
       this.json(res, 409, {
         success: false,
-        error: "This endpoint is served by the pi adapter (openchamber-pi-connector), not a real opencode install — there is nothing to upgrade.",
+        error: "This endpoint is served by the Droid adapter (openchamber-droid-connector), not a real opencode install — there is nothing to upgrade.",
       });
       return;
     }
@@ -274,8 +274,9 @@ export class AdapterServer {
             .map((p) => p.text!)
             .join("\n");
           await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID);
+          await this.sessions.waitForTurn(sessionId!);
           const msgs = this.sessions.messages(sessionId!) ?? [];
-          this.json(res, 200, msgs[msgs.length - 1] ?? null);
+          this.json(res, 200, [...msgs].reverse().find((m) => m.info.role === "assistant") ?? null);
           return;
         }
         case "POST /abort":
@@ -301,7 +302,7 @@ export class AdapterServer {
       return;
     }
 
-    // --- model catalog (from pi) ---
+    // --- model catalog (from droid) ---
     if (path === "/provider" && method === "GET") {
       const cat = await this.catalog();
       this.json(res, 200, { all: cat.providers, default: cat.defaults, connected: cat.providers.map((p) => p.id) });
@@ -338,7 +339,14 @@ export class AdapterServer {
       return;
     }
     if (path === "/permission" && method === "GET") {
-      this.json(res, 200, []);
+      this.json(res, 200, this.sessions.pendingPermissions());
+      return;
+    }
+    const permissionReply = path.match(/^\/permission\/([^/]+)\/reply$/);
+    if (permissionReply && method === "POST") {
+      const body = (await this.body(req)) as { reply?: string };
+      const reply = body.reply === "always" || body.reply === "reject" ? body.reply : "once";
+      this.json(res, 200, this.sessions.replyPermission(decodeURIComponent(permissionReply[1]!), reply));
       return;
     }
     if (path === "/lsp" && method === "GET") {
@@ -369,17 +377,17 @@ export class AdapterServer {
       return;
     }
     if (path === "/agent" && method === "GET") {
-      // pi has one agent; publish OpenChamber's conventional `build` primary
-      // agent next to pi's own name so the picker — and its default resolution,
+      // Droid has one agent; publish OpenChamber's conventional `build` primary
+      // agent next to Droid so the picker — and its default resolution,
       // which looks for `build` — has a real option. Both names run the same
-      // pi agent (see getExposedAgentNames).
+      // Droid agent (see getExposedAgentNames).
       const piName = getAgentName();
       this.json(res, 200, getExposedAgentNames().map((name) => ({
         name,
         description:
           name === piName
-            ? `${piName} (pi coding agent via openchamber-pi-connector)`
-            : `${name} — ${piName} (pi coding agent via openchamber-pi-connector)`,
+            ? `${piName} (Droid via openchamber-droid-connector)`
+            : `${name} — ${piName} (Droid via openchamber-droid-connector)`,
         mode: "primary",
         hidden: false,
         options: {},
@@ -401,8 +409,8 @@ export class AdapterServer {
       name,
       description:
         name === piName
-          ? `${piName} (pi coding agent via openchamber-pi-connector)`
-          : `${name} — ${piName} (pi coding agent via openchamber-pi-connector)`,
+          ? `${piName} (Droid via openchamber-droid-connector)`
+          : `${name} — ${piName} (Droid via openchamber-droid-connector)`,
       mode: "primary",
       hidden: false,
       options: {},
@@ -630,7 +638,9 @@ export class AdapterServer {
       if (permissionMatch) {
         const requestId = decodeURIComponent(permissionMatch[1]!);
         if (permissionMatch[2] === "/reply" && method === "POST") {
-          await this.body(req);
+          const body = (await this.body(req)) as { reply?: string };
+          const reply = body.reply === "always" || body.reply === "reject" ? body.reply : "once";
+          this.sessions.replyPermission(requestId, reply);
           res.writeHead(204).end();
           return;
         }
@@ -705,7 +715,7 @@ export class AdapterServer {
         case "POST /model": {
           // The UI awaits this before every prompt (applySendSelection →
           // switchModel), so it is the only route from the bottom-right picker
-          // to pi. Dropping the body used to leave the UI showing a model pi
+          // to Droid. Dropping the body used to leave the UI showing a model Droid
           // never ran. 204 empty is the contract; 400/404 are the statuses the
           // client declares, and a loud failure beats a silent drift.
           const body = (await this.body(req)) as { model?: { providerID?: string; id?: string; modelID?: string } };
@@ -717,10 +727,10 @@ export class AdapterServer {
           try {
             const resolved = await this.sessions.setModel(sessionId, ref);
             if (resolved.modelID !== ref.modelID || resolved.providerID !== ref.providerID) {
-              // pi resolved the request to a different concrete model (alias or
+              // Droid resolved the request to a different concrete model (alias or
               // provider-reported id). Not an error, but the reason the UI ends
               // up showing something other than what was picked.
-              debugLog(`[model] session ${sessionId}: pi resolved ${ref.providerID}/${ref.modelID} -> ${resolved.providerID}/${resolved.modelID}`);
+              debugLog(`[model] session ${sessionId}: Droid resolved ${ref.providerID}/${ref.modelID} -> ${resolved.providerID}/${resolved.modelID}`);
             }
             res.writeHead(204).end();
           } catch (err) {

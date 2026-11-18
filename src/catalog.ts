@@ -1,22 +1,16 @@
 /**
- * Model/provider catalog: obtained from a throwaway `pi --mode rpc` process
- * (`get_available_models` + `get_state`), translated into OpenCode v2
- * Provider/Model shapes, cached for the adapter lifetime.
+ * Model/provider catalog: Droid's selectable models (SDK `listModels`),
+ * translated into OpenCode v2 Provider/Model shapes and cached for the adapter
+ * lifetime. All models are exposed under one provider, `droid`, so a model id
+ * alone identifies what Droid runs.
  */
 
-import { PiRpcClient } from "./pi-rpc.js";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { listModels, type ModelInfo } from "@factory/droid-sdk/node";
 
-interface PiModelInfo {
-  id: string;
-  provider: string;
-  name?: string;
-  reasoning?: boolean;
-  input?: string[];
-  baseUrl?: string;
-  contextWindow?: number;
-  maxTokens?: number;
-  cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
-}
+export const PROVIDER_ID = "droid";
 
 interface OCv2Model {
   id: string;
@@ -51,104 +45,65 @@ export interface Catalog {
   /** providerID → default modelID */
   defaults: Record<string, string>;
   /**
-   * The model pi reported as *active*. Separate from `defaults` because the
-   * client pins its picker to /api/model/default and then validates it against
-   * the catalog — an arbitrary pick here silently becomes the model the UI
-   * believes is running.
+   * The model Droid would start a new session with. The client pins its picker
+   * to this and validates it against the catalog, so it must be listed.
    */
   default?: { providerID: string; modelID: string };
 }
 
-function toOCModel(m: PiModelInfo): OCv2Model {
-  const inputs = new Set(m.input ?? ["text"]);
-  const modality = (name: string): boolean => inputs.has(name);
+function toOCModel(m: ModelInfo): OCv2Model {
+  const image = m.noImageSupport !== true;
+  const reasoning = m.supportedReasoningEfforts.some((e) => e !== "none");
   return {
     id: m.id,
-    providerID: m.provider,
-    api: { id: m.id, url: m.baseUrl ?? "", npm: "@ai-sdk/openai-compatible" },
-    name: m.name ?? m.id,
+    providerID: PROVIDER_ID,
+    api: { id: m.id, url: "", npm: "@ai-sdk/openai-compatible" },
+    name: m.displayName,
     capabilities: {
-      temperature: true,
-      reasoning: m.reasoning ?? false,
-      attachment: modality("image"),
+      temperature: false,
+      reasoning,
+      attachment: image,
       toolcall: true,
-      input: { text: modality("text"), audio: false, image: modality("image"), video: false, pdf: false },
+      input: { text: true, audio: false, image, video: false, pdf: false },
       output: { text: true, audio: false, image: false, video: false, pdf: false },
-      interleaved: m.reasoning ? true : false,
+      interleaved: reasoning,
     },
-    cost: {
-      input: m.cost?.input ?? 0,
-      output: m.cost?.output ?? 0,
-      cache: { read: m.cost?.cacheRead ?? 0, write: m.cost?.cacheWrite ?? 0 },
-    },
-    limit: { context: m.contextWindow ?? 0, output: m.maxTokens ?? 0 },
-    options: {},
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 0, output: 0 },
+    options: { provider: m.modelProvider },
   };
 }
 
-export async function loadCatalog(directory: string): Promise<Catalog> {
-  const pi = new PiRpcClient({ cwd: directory });
+/** The model Droid itself would pick: env override, then the user's settings. */
+function configuredDefaultModel(): string | undefined {
+  const fromEnv = process.env.OCDROID_MODEL?.trim();
+  if (fromEnv) return fromEnv;
   try {
-    const [modelsRes, firstState] = await Promise.all([
-      pi.command<{ models: PiModelInfo[] }>({ type: "get_available_models" }),
-      pi.command<{ model: PiModelInfo | null }>({ type: "get_state" }),
-    ]);
-
-    const providers = new Map<string, OCv2Provider>();
-    if (modelsRes.success && modelsRes.data) {
-      for (const m of modelsRes.data.models) {
-        let p = providers.get(m.provider);
-        if (!p) {
-          p = { id: m.provider, name: m.provider, source: "config", env: [], options: {}, models: {} };
-          providers.set(m.provider, p);
-        }
-        p.models[m.id] = toOCModel(m);
-      }
-    }
-
-    // get_state occasionally races pi's own startup. One retry beats resolving
-    // no active model, which is precisely what leaves the UI picker guessing.
-    let active = firstState.success ? firstState.data?.model ?? null : null;
-    if (active === null) {
-      const retry = await pi.command<{ model: PiModelInfo | null }>({ type: "get_state" });
-      active = retry.success ? retry.data?.model ?? null : null;
-    }
-    if (active === null) {
-      console.error("[catalog] warning: pi reported no active model — /api/model/default will be null and the UI picker falls back to its own default");
-    }
-
-    const defaults: Record<string, string> = {};
-    let resolvedDefault: { providerID: string; modelID: string } | undefined;
-    if (active !== null) {
-      defaults[active.provider] = active.id;
-      resolvedDefault = { providerID: active.provider, modelID: active.id };
-      // The client drops any selection it cannot find in this catalog and picks
-      // something else instead, so a model get_available_models omitted still
-      // has to be listed here — otherwise the active model is unselectable.
-      let p = providers.get(active.provider);
-      if (p === undefined) {
-        p = { id: active.provider, name: active.provider, source: "config", env: [], options: {}, models: {} };
-        providers.set(active.provider, p);
-      }
-      if (p.models[active.id] === undefined) p.models[active.id] = toOCModel(active);
-    }
-
-    // OpenChamber's picker defaults to the first listed provider/model — put pi's active config there.
-    const sorted = [...providers.values()].sort((a, b) => {
-      const aDef = defaults[a.id] !== undefined ? 0 : 1;
-      const bDef = defaults[b.id] !== undefined ? 0 : 1;
-      return aDef - bDef;
-    });
-    for (const p of sorted) {
-      const def = defaults[p.id];
-      if (!def) continue;
-      const entries = Object.entries(p.models).sort(([a], [b]) => (a === def ? -1 : b === def ? 1 : 0));
-      p.models = Object.fromEntries(entries);
-    }
-
-    // exactOptionalPropertyTypes: omit `default` rather than set it undefined.
-    return resolvedDefault !== undefined ? { providers: sorted, defaults, default: resolvedDefault } : { providers: sorted, defaults };
-  } finally {
-    await pi.dispose();
+    const raw = JSON.parse(readFileSync(join(homedir(), ".factory", "settings.json"), "utf8")) as {
+      sessionDefaultSettings?: { model?: unknown };
+      model?: unknown;
+    };
+    const m = raw.sessionDefaultSettings?.model ?? raw.model;
+    if (typeof m === "string" && m !== "") return m;
+  } catch {
+    /* missing or unparseable settings: fall back to the first listed model */
   }
+  return undefined;
+}
+
+export async function loadCatalog(_directory: string): Promise<Catalog> {
+  const models = await listModels({ includeDisabled: false });
+  const preferred = configuredDefaultModel();
+  const ordered = [...models].sort((a, b) => (a.id === preferred ? -1 : b.id === preferred ? 1 : 0));
+
+  const provider: OCv2Provider = { id: PROVIDER_ID, name: "Droid", source: "config", env: [], options: {}, models: {} };
+  for (const m of ordered) provider.models[m.id] = toOCModel(m);
+
+  const first = ordered[0];
+  if (first === undefined) return { providers: [provider], defaults: {} };
+  return {
+    providers: [provider],
+    defaults: { [PROVIDER_ID]: first.id },
+    default: { providerID: PROVIDER_ID, modelID: first.id },
+  };
 }

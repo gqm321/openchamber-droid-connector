@@ -3,7 +3,7 @@
  *
  * NOTE: this file used to be kept byte-identical with openchamber-mcode's
  * v2.ts and no longer is — `model.changed` → `session.model.selected` and the
- * honest /api/model/default resolution are pi-side additions. Mirror them to
+ * honest /api/model/default resolution are adapter-side additions. Mirror them to
  * mcode only together with an equivalent `Catalog.default`; without it mcode
  * would lose its default-model resolution entirely.
  *
@@ -64,7 +64,7 @@ export interface V2Model {
 
 /**
  * Structural subset of each connector's Catalog (catalog.ts). Keeping it local
- * lets this file stay byte-identical between the mcode and pi repos.
+ * lets this file stay byte-identical between the mcode and droid repos.
  */
 interface CatalogModelLike {
   id: string;

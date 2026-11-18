@@ -1,20 +1,20 @@
 {
-  "name": "openchamber-pi-connector",
+  "name": "openchamber-droid-connector",
   "version": "0.1.0",
-  "description": "OpenCode-API-compatible adapter that lets OpenChamber drive the pi coding agent",
+  "description": "OpenCode-API-compatible adapter that lets OpenChamber drive Factory Droid",
   "type": "module",
   "license": "MIT",
   "bin": {
-    "openchamber-pi": "./dist/cli.js"
+    "openchamber-droid": "./dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "probe": "tsx contrib/probe.ts",
     "smoke": "tsx contrib/smoke.ts",
-    "model-smoke": "tsx contrib/model-consistency.ts",
-    "v2-smoke": "tsx contrib/v2-smoke.ts"
+    "v2-smoke": "tsx contrib/v2-smoke.ts",
+    "droid-probe": "tsx contrib/droid-probe.ts",
+    "permission-smoke": "tsx contrib/permission-smoke.ts"
   },
   "engines": {
     "node": ">=22"
@@ -24,5 +24,8 @@
     "@types/node": "^26.6.2",
     "tsx": "^4.23.14",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@factory/droid-sdk": "^0.11.0"
   }
 }

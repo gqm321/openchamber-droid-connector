@@ -8,9 +8,9 @@
  *
  *   npm run v2-smoke
  *
- * Requires the connector's agent on PATH (mcode / pi), since the prompt is a
+ * Requires the connector's agent on PATH (droid), since the prompt is a
  * real agent run. Point it at another binary with the connector's env override
- * (OCMC_MCODE_BINARY / OCPI_PI_BINARY).
+ * (OCMC_MCODE_BINARY / OCDROID_PI_BINARY).
  */
 
 import { mkdtempSync } from "node:fs";
@@ -20,7 +20,7 @@ import { AdapterServer } from "../src/server.js";
 
 const WORKSPACE = mkdtempSync(join(tmpdir(), "oc-v2-smoke-"));
 process.env.OCMC_STATE_FILE = join(WORKSPACE, "adapter-state.json");
-process.env.OCPI_STATE_DIR = join(WORKSPACE, "pi-state");
+process.env.OCDROID_STATE_DIR = join(WORKSPACE, "Droid-state");
 process.env.OCMC_TURN_TIMEOUT = process.env.OCMC_TURN_TIMEOUT ?? "240s";
 
 let failures = 0;
@@ -267,9 +267,9 @@ async function main(): Promise<void> {
 
   const setAgent = await api<unknown>(url, `/api/session/${encodeURIComponent(sessionId)}/agent`, { method: "POST", body: JSON.stringify({ agent: firstAgentId ?? "build" }) });
   ok("POST /api/session/:id/agent → 204", setAgent.status === 204);
-  // A model pi does not have must be refused, not silently accepted: the UI
+  // A model Droid does not have must be refused, not silently accepted: the UI
   // awaits this call before every prompt, so a fake 204 is how the picker and
-  // pi end up disagreeing. contrib/model-consistency.ts covers the happy path.
+  // Droid end up disagreeing. covered by smoke.ts.
   const setModel = await api<unknown>(url, `/api/session/${encodeURIComponent(sessionId)}/model`, { method: "POST", body: JSON.stringify({ model: { providerID: "x", id: "y" } }) });
   ok("POST /api/session/:id/model with an unknown model → 400", setModel.status === 400, `status ${setModel.status}`);
 

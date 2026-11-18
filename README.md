@@ -1,123 +1,62 @@
-# OpenChamber Pi Connector
+# openchamber-droid-connector
 
-Use [OpenChamber](https://github.com/openchamber/openchamber) with the
-[pi coding agent](https://github.com/badlogic/pi-mono) (`@earendil-works/pi-coding-agent`)
-instead of OpenCode.
+让 [OpenChamber](https://github.com/btriapitsyn/openchamber) 把 [Factory Droid](https://factory.ai) 当作后端使用。
 
-`openchamber-pi` is a local adapter server that speaks the subset of the
-OpenCode HTTP/SSE API that OpenChamber actually consumes, and drives pi agent
-sessions underneath via pi's [RPC mode](https://pi.dev/docs/latest/rpc)
-(`pi --mode rpc`, JSONL over stdio) or the pi SDK (`AgentSession`).
+适配器对外模拟 OpenCode 的 HTTP + SSE 服务,对内通过官方 `@factory/droid-sdk` 驱动 `droid`。
+OpenChamber 通过 `settings.opencodeBinary` 把它当作 `opencode serve` 来启动。
 
-```
-OpenChamber (UI)  ──OpenCode API──▶  openchamber-pi  ──JSONL/stdio──▶  pi --mode rpc (one process per session)
-```
+基于 [qingzhu521/openchamber-pi-connector](https://github.com/qingzhu521/openchamber-pi-connector)(MIT)改造,后端由 pi 换成 Droid。
 
-No OpenChamber fork required: point OpenChamber at this adapter as an
-**external OpenCode server** and sessions run on pi.
+## 要求
 
-[![GitHub stars](https://img.shields.io/github/stars/qingzhu521/openchamber-pi-connector?style=flat&labelColor=100F0F&color=66800B)](https://github.com/qingzhu521/openchamber-pi-connector/stargazers)
-[![License](https://img.shields.io/github/license/qingzhu521/openchamber-pi-connector?style=flat&labelColor=100F0F&color=205EA6)](./LICENSE)
-[![OpenChamber](https://img.shields.io/badge/OpenChamber-1.24.x-100F0F?style=flat)](https://github.com/openchamber/openchamber)
+- Node 20+
+- 已安装并登录的 `droid`(`FACTORY_API_KEY` 或 `droid` 登录态)
+- OpenChamber 1.24.x(`@openchamber/web@1.24.2` 已联调)
 
-## Quick start
-
-Needs Node.js 22+ and the `pi` CLI on PATH (`npm i -g @earendil-works/pi-coding-agent`).
-
-```bash
-git clone https://github.com/qingzhu521/openchamber-pi-connector.git
-cd openchamber-pi-connector
-npm install && npm run build
-
-mkdir -p ~/.config/openchamber-pi
-printf '{\n  "opencodeBinary": "%s/bin/opencode-pi"\n}\n' "$PWD" \
-  > ~/.config/openchamber-pi/settings.json
-
-OPENCHAMBER_DATA_DIR=~/.config/openchamber-pi openchamber serve --port 57124
-# open http://127.0.0.1:57124
-```
-
-That starts a second OpenChamber instance whose sessions run on pi, leaving
-your main OpenChamber setup untouched.
-
-## Compatibility
-
-| OpenChamber | Status |
-|---|---|
-| 1.24.x (desktop, API v1) | tested against 1.24.2 |
-| other versions | not tested |
-
-OpenChamber changes which OpenCode API calls it makes between releases. If a
-feature breaks on a newer OpenChamber, run `npm run smoke` to see which part
-failed, then open an issue with the output. See
-[docs/api-surface.md](docs/api-surface.md) for the endpoints this adapter
-implements.
-
-## Status
-
-**M1 + M2 work**: a real OpenChamber UI session chatting through the adapter
-with pi as the backend — session create, prompt, live text/reasoning
-streaming over SSE, **tool call parts** (bash/write/edit… rendered in
-OpenChamber with arguments, results and completed/error states, mapped to
-the SDK v2 `ToolState` union), abort, rename, archive (`time.archived` + list
-filtering), delete, model catalog from pi.
-See [docs/architecture.md](docs/architecture.md) for the design and
-[docs/api-surface.md](docs/api-surface.md) for the endpoint compatibility
-list.
-
-## Usage with OpenChamber
-
-OpenChamber spawns whatever `$OPENCODE_BINARY` / `settings.opencodeBinary`
-points to as `serve --hostname H --port P`, waits for the stdout line
-`opencode server listening on <url>`, then health-checks `/global/health`.
-This repo's `bin/opencode-pi` wrapper implements that contract on top of pi.
-
-Recommended: run a second, isolated OpenChamber profile so your main setup is
-untouched:
-
-```bash
-# isolated profile dir
-mkdir -p ~/.config/openchamber-pi
-cat > ~/.config/openchamber-pi/settings.json <<'EOF'
-{
-  "opencodeBinary": "/absolute/path/to/openchamber-pi-connector/bin/opencode-pi"
-}
-EOF
-
-# start OpenChamber with pi as the agent backend
-OPENCHAMBER_DATA_DIR=~/.config/openchamber-pi openchamber serve --port 57124
-# open http://127.0.0.1:57124
-```
-
-Requires: Node.js 22+, the `pi` CLI on PATH (`npm i -g @earendil-works/pi-coding-agent`).
-
-Debug logging: set `OCPI_DEBUG=1` (writes HTTP requests and pi events to
-`/tmp/openchamber-pi-debug.log`, override with `OCPI_DEBUG_LOG`).
-
-## Standalone / smoke test
+## 使用
 
 ```bash
 npm install
-npm run build
-npm run smoke   # end-to-end: bootstrap probes, tool round (real pi run), abort, rename, delete
-npm run probe   # dump raw pi RPC events to pi-probe-events.jsonl (protocol forensics)
+# OpenChamber 的 settings.json:
+#   { "opencodeBinary": "/绝对路径/bin/opencode-droid" }
+# 或设置环境变量 OPENCODE_BINARY
+OPENCHAMBER_DATA_DIR=~/.config/openchamber-droid openchamber --port 3901
 ```
 
-## Why
+## 环境变量
 
-- OpenChamber is a great workspace UI (multi-run, session goals, diff
-  walkthroughs, mobile surfaces) but is hard-wired to the OpenCode SDK.
-- pi is a minimal, hackable coding agent with a first-class headless RPC
-  protocol and SDK — but no rich UI.
-- This project connects the two without forking either.
+| 变量 | 作用 |
+| --- | --- |
+| `OCDROID_MODEL` | 默认模型,缺省取 `~/.factory/settings.json` 的 `sessionDefaultSettings.model` |
+| `OCDROID_AUTONOMY` | Droid 自主级别,默认 `low`(需要权限时会在 UI 里询问) |
+| `OCDROID_AGENT` | 暴露的 agent 名,默认 `build` |
+| `OCDROID_TOOL_MODE` | 透传给 Droid 的 toolExecutionMode |
+| `OCDROID_STATE_DIR` | 适配器状态目录(归档标记、模型记忆) |
 
-## Non-goals
+## 已支持
 
-- Reimplementing OpenChamber's own platform features (scheduler, relay,
-  goals). Those live in OpenChamber and keep working.
-- Wrapping pi as an LLM provider inside OpenCode. pi is a full agent with its
-  own loop; we adapt at the session-protocol level.
+- 会话创建/列表/改名/归档/删除;会话来自 `~/.factory/sessions`,重启后历史与工具部件可恢复,并能续聊
+- 流式文本、思考内容、工具调用(Execute→bash、Read、Create→write、Edit、Grep、Glob 等)
+- 权限询问:`permission.asked` → `POST /permission/{id}/reply`(once / always / reject)
+- 模型切换、中止(interrupt)
 
-## License
+## 已知缺口
+
+- revert、todo、share、文件 diff 为桩实现(diff 返回 501)
+- Droid 的 AskUser 未映射到 question 事件
+- Droid 默认用 `Script` 包装工具,`direct_only` 无法强制;适配器隐藏包装、只显示内部调用
+- 仅文本 parts,不处理图片/文件附件
+- 只在 OpenChamber 1.24.x 验证,未测 2.x
+
+## 测试(需真实 droid)
+
+```bash
+npm run smoke              # 33 项
+npm run v2-smoke           # 44 项
+npm run permission-smoke   # 14 项
+npm run typecheck
+```
+
+## 许可
 
 MIT

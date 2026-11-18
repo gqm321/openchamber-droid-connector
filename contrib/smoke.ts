@@ -1,22 +1,23 @@
 /**
- * End-to-end smoke test for the pi adapter — no OpenChamber required.
+ * End-to-end smoke test for the Droid adapter — no OpenChamber required.
  *
  * Drives the adapter's OpenCode HTTP surface exactly the way OpenChamber
  * would (bootstrap probes → session create → tool-forcing prompt_async +
- * SSE → sync prompt → abort + reuse → rename → delete), with a real pi
+ * SSE → sync prompt → abort + reuse → rename → delete), with a real Droid
  * agent behind every prompt.
  *
  *   npm run smoke
- *   OCPI_PI_BINARY=/path/to/pi npm run smoke
+ *   npm run smoke
  */
 
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { AdapterServer } from "../src/server.js";
+import { SseCollector, api } from "./util.js";
 import type { OCEvent, OCSession, OCMessageWithParts } from "../src/types.js";
 
-const WORKSPACE = mkdtempSync(join(tmpdir(), "ocpi-smoke-"));
+const WORKSPACE = mkdtempSync(join(tmpdir(), "ocdroid-smoke-"));
 
 let failures = 0;
 let checks = 0;
@@ -29,99 +30,6 @@ function ok(name: string, cond: boolean, detail = ""): void {
     failures++;
     console.log(`  ❌ ${name}${detail ? ` — ${detail}` : ""}`);
   }
-}
-
-/** Minimal SSE client over fetch, collecting parsed OCEvents. */
-class SseCollector {
-  private events: OCEvent[] = [];
-  private waiters: Array<{ test: (e: OCEvent) => boolean; resolve: (e: OCEvent) => void; timer: NodeJS.Timeout }> = [];
-  private closed = false;
-  private controller = new AbortController();
-
-  constructor(private url: string) {}
-
-  async start(): Promise<void> {
-    const res = await fetch(`${this.url}/event`, {
-      signal: this.controller.signal,
-      headers: { Accept: "text/event-stream" },
-    });
-    if (!res.ok || !res.body) throw new Error(`SSE connect failed: ${res.status}`);
-    void this.pump(res.body);
-  }
-
-  private async pump(body: ReadableStream<Uint8Array>): Promise<void> {
-    const decoder = new TextDecoder();
-    const reader = body.getReader();
-    let buf = "";
-    try {
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        for (;;) {
-          const idx = buf.indexOf("\n\n");
-          if (idx === -1) break;
-          const frame = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          const dataLine = frame.split("\n").find((l) => l.startsWith("data: "));
-          if (!dataLine) continue;
-          try {
-            const ev = JSON.parse(dataLine.slice(6)) as OCEvent;
-            this.events.push(ev);
-            for (const w of [...this.waiters]) {
-              if (w.test(ev)) {
-                this.waiters.splice(this.waiters.indexOf(w), 1);
-                clearTimeout(w.timer);
-                w.resolve(ev);
-              }
-            }
-          } catch {
-            /* malformed frame */
-          }
-        }
-      }
-    } catch (err) {
-      if (!this.closed) console.error("  [sse] pump error:", err instanceof Error ? err.message : err);
-    }
-    this.closed = true;
-  }
-
-  waitFor(test: (e: OCEvent) => boolean, timeoutMs: number, label: string): Promise<OCEvent> {
-    const existing = this.events.find(test);
-    if (existing) return Promise.resolve(existing);
-    return new Promise((resolve, reject) => {
-      const waiter = {
-        test,
-        resolve,
-        timer: setTimeout(() => {
-          this.waiters.splice(this.waiters.indexOf(waiter), 1);
-          reject(new Error(`timeout waiting for ${label} after ${timeoutMs}ms`));
-        }, timeoutMs),
-      };
-      this.waiters.push(waiter);
-    });
-  }
-
-  stop(): void {
-    this.controller.abort();
-  }
-
-  get all(): OCEvent[] {
-    return this.events;
-  }
-}
-
-async function api<T>(url: string, path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
-  const res = await fetch(`${url}${path}`, init);
-  const text = await res.text();
-  let body: T;
-  try {
-    body = text === "" ? (undefined as T) : (JSON.parse(text) as T);
-  } catch {
-    body = text as unknown as T;
-  }
-  return { status: res.status, body: text === "" ? undefined : body };
 }
 
 function promptBody(text: string): string {
@@ -156,7 +64,7 @@ async function main(): Promise<void> {
   }
 
   // 2. session create + tool-forcing prompt
-  console.log("— session create + tool round (real pi run) —");
+  console.log("— session create + tool round (real droid run) —");
   const created = await api<OCSession>(url, "/session", { method: "POST", body: JSON.stringify({}) });
   ok("POST /session", created.status === 200 && typeof created.body.id === "string");
   const sessionId = created.body.id;
@@ -167,14 +75,14 @@ async function main(): Promise<void> {
     // OpenChamber sends a client-generated messageID (optimistic insert) —
     // the adapter must reuse it and echo the user part, or the UI renders
     // the message twice (verified against OpenChamber's event-reducer).
-    body: JSON.stringify({ messageID: "msg_piclientecho0001", parts: [{ type: "text", text: 'Use your bash tool to run exactly this command: echo tool-pi-smoke. Then reply with exactly: PI-TOOLS-DONE' }] }),
+    body: JSON.stringify({ messageID: "msg_clientecho0001", parts: [{ type: "text", text: 'Use your bash tool to run exactly this command: echo tool-droid-smoke. Then reply with exactly: DROID-TOOLS-DONE' }] }),
   });
   ok("POST /prompt_async accepted", asyncRes.status === 204, `status ${asyncRes.status}`);
 
   const userPartEcho = await sse.waitFor(
     (e) =>
       e.type === "message.part.updated" &&
-      (e.properties as { part?: { messageID?: string; type?: string } }).part?.messageID === "msg_piclientecho0001" &&
+      (e.properties as { part?: { messageID?: string; type?: string } }).part?.messageID === "msg_clientecho0001" &&
       (e.properties as { part?: { type?: string } }).part?.type === "text",
     10_000,
     "user part echo",
@@ -202,22 +110,22 @@ async function main(): Promise<void> {
   );
   ok(
     "tool state.input carries the command",
-    toolPart !== undefined && String(toolPart.state?.input?.command ?? "").includes("tool-pi-smoke"),
+    toolPart !== undefined && String(toolPart.state?.input?.command ?? "").includes("tool-droid-smoke"),
     JSON.stringify(toolPart?.state?.input),
   );
   ok(
     "tool state.output carries the stdout",
-    toolPart !== undefined && (toolPart.state?.output ?? "").includes("tool-pi-smoke"),
+    toolPart !== undefined && (toolPart.state?.output ?? "").includes("tool-droid-smoke"),
     JSON.stringify(toolPart?.state?.output)?.slice(0, 160),
   );
   const assistants = (messages.body ?? []).filter((m) => m.info.role === "assistant");
-  ok("assistant text answer after tools", assistants.some((m) => textOf(m).includes("PI-TOOLS-DONE")), assistants.map(textOf).join(" | ").slice(0, 160));
+  ok("assistant text answer after tools", assistants.some((m) => textOf(m).includes("DROID-TOOLS-DONE")), assistants.map(textOf).join(" | ").slice(0, 160));
   const userStored = (messages.body ?? []).find((m) => m.info.role === "user");
-  ok("user message keeps the client messageID", userStored?.info.id === "msg_piclientecho0001", userStored?.info.id);
+  ok("user message keeps the client messageID", userStored?.info.id === "msg_clientecho0001", userStored?.info.id);
 
   // 3. sync prompt
-  const syncRes = await api<OCMessageWithParts>(url, `/session/${sessionId}/message`, { method: "POST", body: promptBody("Reply with exactly: PI-SYNC-OK") });
-  ok("POST /message (sync)", syncRes.status === 200 && textOf(syncRes.body).includes("PI-SYNC-OK"), textOf(syncRes.body).slice(0, 120));
+  const syncRes = await api<OCMessageWithParts>(url, `/session/${sessionId}/message`, { method: "POST", body: promptBody("Reply with exactly: DROID-SYNC-OK") });
+  ok("POST /message (sync)", syncRes.status === 200 && textOf(syncRes.body).includes("DROID-SYNC-OK"), textOf(syncRes.body).slice(0, 120));
 
   // 4. abort mid-run, then prove the session is still usable
   console.log("— abort mid-run + reuse —");
@@ -232,12 +140,12 @@ async function main(): Promise<void> {
   await sse.waitFor((e) => e.type === "session.idle" && (e.properties as { sessionID: string }).sessionID === sessionId, 60_000, "idle after abort");
   ok("idle after abort", true);
 
-  const syncRes2 = await api<OCMessageWithParts>(url, `/session/${sessionId}/message`, { method: "POST", body: promptBody("Reply with exactly: PI-AFTER-ABORT-OK") });
-  ok("sync prompt after abort still works", syncRes2.status === 200 && textOf(syncRes2.body).includes("PI-AFTER-ABORT-OK"), textOf(syncRes2.body).slice(0, 120));
+  const syncRes2 = await api<OCMessageWithParts>(url, `/session/${sessionId}/message`, { method: "POST", body: promptBody("Reply with exactly: DROID-AFTER-ABORT-OK") });
+  ok("sync prompt after abort still works", syncRes2.status === 200 && textOf(syncRes2.body).includes("DROID-AFTER-ABORT-OK"), JSON.stringify(syncRes2.body).slice(0, 300));
 
   // 5. rename + delete
-  const renamed = await api<OCSession>(url, `/session/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title: "pi-smoke-renamed" }) });
-  ok("PATCH rename", renamed.status === 200 && renamed.body.title === "pi-smoke-renamed");
+  const renamed = await api<OCSession>(url, `/session/${sessionId}`, { method: "PATCH", body: JSON.stringify({ title: "droid-smoke-renamed" }) });
+  ok("PATCH rename", renamed.status === 200 && renamed.body.title === "droid-smoke-renamed");
   const del = await api<unknown>(url, `/session/${sessionId}`, { method: "DELETE" });
   ok("DELETE session", del.status === 200);
   const listedAfter = await api<OCSession[]>(url, "/session");
