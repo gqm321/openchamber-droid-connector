@@ -15,7 +15,7 @@ import {
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
 import { getAgentName } from "./agent-name.js";
-import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
+import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
@@ -738,8 +738,8 @@ export class SessionManager {
         turn.record.parts.push(part);
         this.emitPart(s, part, block.text);
       } else if (block.type === "tool_use" && typeof block.id === "string") {
-        const outer = (block.scriptExecution as Json | undefined)?.outerToolUseId;
-        if (typeof outer === "string") turn.scripts.get(outer)?.nested.add(block.id);
+        const outer = outerScriptId(block);
+        if (outer !== undefined) turn.scripts.get(outer)?.nested.add(block.id);
         if (!turn.tools.has(block.id) && !turn.scripts.has(block.id)) {
           this.onToolCall(s, turn, block.id, String(block.name), (block.input ?? {}) as Json);
         }

@@ -111,9 +111,23 @@ export function mapTool(name: string, input: Json): MappedTool {
       const done = todos.filter((t) => t.status === "completed").length;
       return { tool: "todowrite", input: { ...input, todos }, title: `${done}/${todos.length} done` };
     }
+    case "Script":
+      return { tool: "script", input: { ...input }, title: "script" };
     default:
       return { tool: name.toLowerCase(), input: { ...input }, title: name };
   }
+}
+
+/**
+ * The `Script` call a nested tool call belongs to. The live SDK stream uses
+ * `scriptExecution.outerToolUseId`; Droid's session files store the same fact
+ * as `script_execution.outer_tool_use_id`.
+ */
+export function outerScriptId(block: Json): string | undefined {
+  const live = (block.scriptExecution as Json | undefined)?.outerToolUseId;
+  if (typeof live === "string") return live;
+  const stored = (block.script_execution as Json | undefined)?.outer_tool_use_id;
+  return typeof stored === "string" ? stored : undefined;
 }
 
 /** tool_result content (string or content blocks) to plain text. */
@@ -240,6 +254,7 @@ export function parseDroidSessionFile(
   const toolParts = new Map<string, OCToolPart>();
   /** Script wrapper tool_use id to the ids of calls nested inside it. */
   const scriptNested = new Map<string, number>();
+  const nestedParts = new Map<string, OCToolPart[]>();
   const seenCompactions = new Set<string>();
   let lastUserId = "";
   let current: { info: OCAssistantMessage; parts: OCPart[] } | undefined;
@@ -348,8 +363,8 @@ export function parseDroidSessionFile(
       } else if (b.type === "thinking" && typeof b.thinking === "string" && b.thinking !== "") {
         current!.parts.push({ ...base, type: "reasoning", text: b.thinking, time: { start: when, end: when } });
       } else if (b.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string") {
-        const outer = (b.scriptExecution as Json | undefined)?.outerToolUseId;
-        if (typeof outer === "string") scriptNested.set(outer, (scriptNested.get(outer) ?? 0) + 1);
+        const outer = outerScriptId(b);
+        if (outer !== undefined) scriptNested.set(outer, (scriptNested.get(outer) ?? 0) + 1);
         const mapped = mapTool(b.name, (b.input ?? {}) as Json);
         const part: OCToolPart = {
           ...base,
@@ -360,6 +375,7 @@ export function parseDroidSessionFile(
         };
         toolParts.set(b.id, part);
         current!.parts.push(part);
+        if (outer !== undefined) nestedParts.set(outer, [...(nestedParts.get(outer) ?? []), part]);
       }
     });
   }
@@ -369,6 +385,15 @@ export function parseDroidSessionFile(
     if (wrapper === undefined || wrapper.state.status === "error") continue;
     const owner = out.find((o) => o.parts.includes(wrapper));
     if (owner !== undefined && nested > 0) owner.parts = owner.parts.filter((p) => p !== wrapper);
+  }
+  // A wrapper that stays (it failed) is shown after the calls it made, as it is live.
+  for (const [scriptId, parts] of nestedParts) {
+    const wrapper = toolParts.get(scriptId);
+    const owner = wrapper === undefined ? undefined : out.find((o) => o.parts.includes(wrapper));
+    if (wrapper === undefined || owner === undefined) continue;
+    const without = owner.parts.filter((p) => p !== wrapper);
+    const last = Math.max(...parts.map((p) => without.indexOf(p)));
+    if (last >= 0) owner.parts = [...without.slice(0, last + 1), wrapper, ...without.slice(last + 1)];
   }
   for (const part of toolParts.values()) {
     if (part.state.status !== "running") continue;
