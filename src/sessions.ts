@@ -15,7 +15,7 @@ import {
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
 import { getAgentName } from "./agent-name.js";
-import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
+import { COMPACTED_FALLBACK_TEXT, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
@@ -582,6 +582,9 @@ export class SessionManager {
     this.emit(s.info.directory, { type: "message.updated", properties: { info: user.info } });
     for (const p of user.parts) this.emitPart(s, p);
     this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+    const card = compactionToolPart({ id: id("prt"), sessionID: s.info.id, messageID: record.id, start: Date.now() });
+    summary.parts.push(card);
+    this.emitPart(s, card);
     try {
       await droid.compact();
       // The next model call will report the real size; until then Droid's estimate
@@ -591,16 +594,8 @@ export class SessionManager {
       const file = findSessionFile(s.droidSessionId, s.info.directory);
       const written = file === undefined ? undefined : latestCompactionSummary(file);
       const now = Date.now();
-      const part: OCTextPart = {
-        id: id("prt"),
-        sessionID: s.info.id,
-        messageID: record.id,
-        type: "text",
-        text: written !== undefined && written.text.trim() !== "" ? written.text : COMPACTED_FALLBACK_TEXT,
-        time: { start: now, end: now },
-      };
-      summary.parts.push(part);
-      this.emitPart(s, part);
+      completeCompactionPart(card, written !== undefined && written.text.trim() !== "" ? written.text : COMPACTED_FALLBACK_TEXT, now);
+      this.emitPart(s, card);
       record.time.completed = now;
       record.finish = "stop";
       this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
@@ -608,7 +603,10 @@ export class SessionManager {
       this.persistMeta(s);
       this.emit(s.info.directory, { type: "session.compacted", properties: { sessionID: s.info.id } });
     } catch (err) {
-      record.time.completed = Date.now();
+      const failedAt = Date.now();
+      card.state = { status: "error", input: {}, error: err instanceof Error ? err.message : String(err), time: { start: card.state.status === "pending" ? failedAt : card.state.time.start, end: failedAt } };
+      this.emitPart(s, card);
+      record.time.completed = failedAt;
       record.finish = "error";
       record.error = { name: "UnknownError", data: { message: err instanceof Error ? err.message : String(err) } };
       this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });

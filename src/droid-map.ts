@@ -140,6 +140,35 @@ export function resultText(content: unknown): string {
 }
 
 export const COMPACTED_FALLBACK_TEXT = "Session compacted";
+export const COMPACT_TOOL = "compact";
+
+/**
+ * The summary as a tool part rather than a text part: OpenChamber renders text
+ * of a summary message as ordinary model output (unless the user has activity
+ * text enabled), whereas a tool part is always a collapsible card.
+ */
+export function compactionToolPart(o: { id: string; sessionID: string; messageID: string; start: number }): OCToolPart {
+  return {
+    id: o.id,
+    sessionID: o.sessionID,
+    messageID: o.messageID,
+    type: "tool",
+    callID: o.id,
+    tool: COMPACT_TOOL,
+    state: { status: "running", input: {}, title: "Compacting context", time: { start: o.start } },
+  };
+}
+
+export function completeCompactionPart(part: OCToolPart, text: string, end: number): void {
+  part.state = {
+    status: "completed",
+    input: {},
+    output: text,
+    title: COMPACTED_FALLBACK_TEXT,
+    metadata: {},
+    time: { start: part.state.status === "pending" ? end : part.state.time.start, end },
+  };
+}
 
 export interface CompactionMessageOptions {
   sessionID: string;
@@ -286,7 +315,9 @@ export function parseDroidSessionFile(
       const summaryInfo = summary.info as OCAssistantMessage;
       summaryInfo.time.completed = when;
       summaryInfo.finish = "stop";
-      summary.parts.push({ id: `prt_compaction_${key}_summary`, sessionID, messageID: summary.info.id, type: "text", text, time: { start: when, end: when } });
+      const card = compactionToolPart({ id: `prt_compaction_${key}_summary`, sessionID, messageID: summary.info.id, start: when });
+      completeCompactionPart(card, text, when);
+      summary.parts.push(card);
       out.push(user, summary);
       lastUserId = user.info.id;
       current = undefined;
