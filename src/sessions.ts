@@ -115,6 +115,8 @@ export interface ManagedSession {
   dormant: boolean;
   /** Settles when the in-flight turn has fully finished (events emitted). */
   turnDone: Promise<void> | undefined;
+  /** A prompt is being set up (resume, model switch) and its turn has not started yet. */
+  preparing?: boolean;
 }
 
 type EventSink = (directory: string, event: OCEvent) => void;
@@ -411,48 +413,71 @@ export class SessionManager {
   ): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
-    const droid = await this.revive(s);
-    this.ensureMessages(s);
 
-    if (model !== undefined) {
-      try {
-        await this.setModel(sessionId, model, variant);
-      } catch (err) {
-        this.emitError(s, err instanceof Error ? err.message : String(err));
-        throw err;
+    // Resuming a dormant session and switching model can take several seconds.
+    // The UI treats "idle with an unanswered user message" as a lost prompt after
+    // a few seconds, so the session goes busy before any of that work starts.
+    const wasBusy = s.turn !== undefined || s.status.type !== "idle" || s.preparing === true;
+    const owner = !noReply && !wasBusy;
+    if (owner) {
+      s.preparing = true;
+      this.setStatus(s, { type: "busy" });
+    }
+    let reported = false;
+    try {
+      const droid = await this.revive(s);
+      this.ensureMessages(s);
+
+      if (model !== undefined) {
+        try {
+          await this.setModel(sessionId, model, variant);
+        } catch (err) {
+          reported = true;
+          this.emitError(s, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
       }
-    }
 
-    // OpenChamber sends a client-generated messageID with its optimistic insert;
-    // the server must reuse it so the echoed events reconcile the optimistic
-    // entry in place instead of rendering the user's message twice.
-    const userMsg: OCUserMessage = {
-      id: typeof messageID === "string" && messageID !== "" ? messageID : id("msg"),
-      sessionID: s.info.id,
-      role: "user",
-      time: { created: Date.now() },
-      agent: getAgentName(),
-      model: s.model ?? model ?? { providerID: PROVIDER_ID, modelID: "unknown" },
-    };
-    const parts: OCPart[] = [{ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "text", text }];
-    s.messages?.push({ info: userMsg, parts });
-    s.info.time.updated = Date.now();
-    if (s.info.title === "New session") {
-      s.info.title = text.slice(0, 60);
-      this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
-    }
-    this.emit(s.info.directory, { type: "message.updated", properties: { info: userMsg } });
-    for (const p of parts) this.emitPart(s, p);
+      // OpenChamber sends a client-generated messageID with its optimistic insert;
+      // the server must reuse it so the echoed events reconcile the optimistic
+      // entry in place instead of rendering the user's message twice.
+      const userMsg: OCUserMessage = {
+        id: typeof messageID === "string" && messageID !== "" ? messageID : id("msg"),
+        sessionID: s.info.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: getAgentName(),
+        model: s.model ?? model ?? { providerID: PROVIDER_ID, modelID: "unknown" },
+      };
+      const parts: OCPart[] = [{ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "text", text }];
+      s.messages?.push({ info: userMsg, parts });
+      s.info.time.updated = Date.now();
+      if (s.info.title === "New session") {
+        s.info.title = text.slice(0, 60);
+        this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
+      }
+      this.emit(s.info.directory, { type: "message.updated", properties: { info: userMsg } });
+      for (const p of parts) this.emitPart(s, p);
 
-    if (noReply) return;
-    // An interrupted turn needs a moment to wind down; wait for it rather than
-    // failing a prompt the user sent right after pressing stop.
-    // A compaction in flight also leaves the session busy without a turn.
-    if (s.turn !== undefined || s.status.type !== "idle") {
-      await Promise.race([s.turnDone, new Promise<void>((resolve) => setTimeout(resolve, 15_000))]);
-      if (s.turn !== undefined || s.status.type !== "idle") throw new Error("session is busy");
+      if (noReply) return;
+      // An interrupted turn needs a moment to wind down; wait for it rather than
+      // failing a prompt the user sent right after pressing stop.
+      // A compaction in flight also leaves the session busy without a turn.
+      if (wasBusy) {
+        await Promise.race([s.turnDone, new Promise<void>((resolve) => setTimeout(resolve, 15_000))]);
+        if (s.turn !== undefined || s.status.type !== "idle" || s.preparing === true) throw new Error("session is busy");
+      }
+      s.preparing = false;
+      s.turnDone = this.runTurn(s, droid, text, userMsg.id);
+    } catch (err) {
+      if (owner) {
+        s.preparing = false;
+        if (!reported) this.emitError(s, err instanceof Error ? err.message : String(err));
+        this.setStatus(s, { type: "idle" });
+        this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
+      }
+      throw err;
     }
-    s.turnDone = this.runTurn(s, droid, text, userMsg.id);
   }
 
   /**
