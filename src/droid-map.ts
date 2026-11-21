@@ -179,6 +179,8 @@ export interface CompactionMessageOptions {
   summaryId: string;
   userPartId: string;
   created: number;
+  /** Droid compacted on its own rather than at the user's request. */
+  auto?: boolean;
 }
 
 /**
@@ -210,7 +212,7 @@ export function compactionMessages(o: CompactionMessageOptions): { user: OCMessa
     summary: true,
   };
   return {
-    user: { info: user, parts: [{ id: o.userPartId, sessionID: o.sessionID, messageID: o.userId, type: "compaction", auto: false }] },
+    user: { info: user, parts: [{ id: o.userPartId, sessionID: o.sessionID, messageID: o.userId, type: "compaction", auto: o.auto === true }] },
     summary: { info: summary, parts: [] },
   };
 }

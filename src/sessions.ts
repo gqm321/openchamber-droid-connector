@@ -117,6 +117,12 @@ export interface ManagedSession {
   turnDone: Promise<void> | undefined;
   /** A prompt is being set up (resume, model switch) and its turn has not started yet. */
   preparing?: boolean;
+  /** A user-requested /compact is in flight; its own flow reports it. */
+  manualCompaction?: boolean;
+  /** Compaction Droid started on its own (context threshold), awaiting its summary. */
+  autoCompaction?: { record: OCAssistantMessage; card: OCToolPart } | undefined;
+  /** Droid summary ids already shown, so a late notification does not add a second card. */
+  compactedIds?: Set<string>;
 }
 
 type EventSink = (directory: string, event: OCEvent) => void;
@@ -215,6 +221,10 @@ export class SessionManager {
   private watchUsage(s: ManagedSession, droid: DroidSession): void {
     droid.onNotification((n) => {
       const inner = (n.params as { notification?: Json } | undefined)?.notification;
+      if (inner?.type === "droid_working_state_changed" || inner?.type === "session_compacted") {
+        this.onCompactionNotification(s, inner);
+        return;
+      }
       if (inner?.type !== "session_token_usage_changed") return;
       const turn = s.turn;
       const usage = lastCallUsage(inner.lastCallTokenUsage);
@@ -563,10 +573,12 @@ export class SessionManager {
     return `${base} (fork #${highest + 1})`;
   }
 
-  private async runCompaction(s: ManagedSession, droid: DroidSession): Promise<void> {
-    this.setStatus(s, { type: "busy" });
-    // Same transcript shape OpenCode produces, so OpenChamber shows the /compact
-    // marker immediately and the summary once Droid has written it.
+  /**
+   * Adds the transcript OpenCode produces for a compaction: a user message with a
+   * `compaction` part (shown as /compact) answered by a flagged summary message
+   * whose card is filled in once Droid has written the summary.
+   */
+  private openCompaction(s: ManagedSession, auto: boolean): { user: OCMessageWithParts; record: OCAssistantMessage; card: OCToolPart } {
     const { user, summary } = compactionMessages({
       sessionID: s.info.id,
       directory: s.info.directory,
@@ -576,6 +588,7 @@ export class SessionManager {
       summaryId: id("msg"),
       userPartId: id("prt"),
       created: Date.now(),
+      auto,
     });
     const record = summary.info as OCAssistantMessage;
     this.ensureMessages(s).push(user, summary);
@@ -585,6 +598,36 @@ export class SessionManager {
     const card = compactionToolPart({ id: id("prt"), sessionID: s.info.id, messageID: record.id, start: Date.now() });
     summary.parts.push(card);
     this.emitPart(s, card);
+    return { user, record, card };
+  }
+
+  private closeCompaction(s: ManagedSession, record: OCAssistantMessage, card: OCToolPart, text: string): void {
+    const now = Date.now();
+    completeCompactionPart(card, text.trim() !== "" ? text : COMPACTED_FALLBACK_TEXT, now);
+    this.emitPart(s, card);
+    record.time.completed = now;
+    record.finish = "stop";
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+    s.info.time.updated = now;
+    this.persistMeta(s);
+    this.emit(s.info.directory, { type: "session.compacted", properties: { sessionID: s.info.id } });
+  }
+
+  private failCompaction(s: ManagedSession, record: OCAssistantMessage, card: OCToolPart, err: unknown): void {
+    const failedAt = Date.now();
+    const message = err instanceof Error ? err.message : String(err);
+    card.state = { status: "error", input: {}, error: message, time: { start: card.state.status === "pending" ? failedAt : card.state.time.start, end: failedAt } };
+    this.emitPart(s, card);
+    record.time.completed = failedAt;
+    record.finish = "error";
+    record.error = { name: "UnknownError", data: { message } };
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+  }
+
+  private async runCompaction(s: ManagedSession, droid: DroidSession): Promise<void> {
+    this.setStatus(s, { type: "busy" });
+    s.manualCompaction = true;
+    const { record, card } = this.openCompaction(s, false);
     try {
       await droid.compact();
       // The next model call will report the real size; until then Droid's estimate
@@ -593,28 +636,73 @@ export class SessionManager {
       if (stats !== undefined && stats.used > 0) record.tokens = usageToTokens({ input: stats.used, output: 0, cacheRead: 0 });
       const file = findSessionFile(s.droidSessionId, s.info.directory);
       const written = file === undefined ? undefined : latestCompactionSummary(file);
-      const now = Date.now();
-      completeCompactionPart(card, written !== undefined && written.text.trim() !== "" ? written.text : COMPACTED_FALLBACK_TEXT, now);
-      this.emitPart(s, card);
-      record.time.completed = now;
-      record.finish = "stop";
-      this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
-      s.info.time.updated = now;
-      this.persistMeta(s);
-      this.emit(s.info.directory, { type: "session.compacted", properties: { sessionID: s.info.id } });
+      if (written !== undefined) (s.compactedIds ??= new Set()).add(written.id);
+      this.closeCompaction(s, record, card, written?.text ?? "");
     } catch (err) {
-      const failedAt = Date.now();
-      card.state = { status: "error", input: {}, error: err instanceof Error ? err.message : String(err), time: { start: card.state.status === "pending" ? failedAt : card.state.time.start, end: failedAt } };
-      this.emitPart(s, card);
-      record.time.completed = failedAt;
-      record.finish = "error";
-      record.error = { name: "UnknownError", data: { message: err instanceof Error ? err.message : String(err) } };
-      this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+      this.failCompaction(s, record, card, err);
       throw err;
     } finally {
+      s.manualCompaction = false;
       this.setStatus(s, { type: "idle" });
       this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
     }
+  }
+
+  /**
+   * Droid compacts on its own when the context fills up, usually in the middle of
+   * a turn. It announces it with a working-state change and, once the summary is
+   * written, `session_compacted`; neither is part of the event stream.
+   */
+  private onCompactionNotification(s: ManagedSession, inner: Json): void {
+    if (s.manualCompaction === true) return;
+    if (inner.type === "droid_working_state_changed") {
+      if (inner.newState === "compacting_conversation" && s.autoCompaction === undefined) this.beginAutoCompaction(s);
+      return;
+    }
+    const summaryId = typeof inner.summaryId === "string" ? inner.summaryId : "";
+    if (summaryId !== "" && s.compactedIds?.has(summaryId) === true) return;
+    if (summaryId !== "") (s.compactedIds ??= new Set()).add(summaryId);
+    if (s.autoCompaction === undefined) this.beginAutoCompaction(s);
+    void this.finishAutoCompaction(s, summaryId);
+  }
+
+  private beginAutoCompaction(s: ManagedSession): void {
+    const turn = s.turn;
+    if (turn !== undefined) {
+      // What Droid says after compacting belongs below the compaction marker, as
+      // when the history is replayed from disk, so the message in progress ends here.
+      turn.message.time.completed = Date.now();
+      turn.message.finish = "stop";
+      this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
+    }
+    const { user, record, card } = this.openCompaction(s, true);
+    s.autoCompaction = { record, card };
+    if (turn === undefined) return;
+    const next = this.newAssistantMessage(s, user.info.id);
+    const nextRecord: OCMessageWithParts = { info: next, parts: [] };
+    s.messages?.push(nextRecord);
+    turn.message = next;
+    turn.record = nextRecord;
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: next } });
+  }
+
+  private async finishAutoCompaction(s: ManagedSession, summaryId: string): Promise<void> {
+    const pending = s.autoCompaction;
+    if (pending === undefined) return;
+    // The record is written around the same moment as the notification.
+    let text = "";
+    for (let attempt = 0; attempt < 15; attempt += 1) {
+      const file = findSessionFile(s.droidSessionId, s.info.directory);
+      const written = file === undefined ? undefined : latestCompactionSummary(file);
+      if (written !== undefined && (summaryId === "" || written.id === summaryId)) {
+        text = written.text;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (s.autoCompaction !== pending) return;
+    s.autoCompaction = undefined;
+    this.closeCompaction(s, pending.record, pending.card, text);
   }
 
   /** Resolves once the session's in-flight turn (if any) has finished. */
@@ -622,8 +710,8 @@ export class SessionManager {
     await this.sessions.get(sessionId)?.turnDone;
   }
 
-  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string): Promise<void> {
-    const assistant: OCAssistantMessage = {
+  private newAssistantMessage(s: ManagedSession, parentID: string): OCAssistantMessage {
+    return {
       id: id("msg"),
       sessionID: s.info.id,
       role: "assistant",
@@ -636,6 +724,10 @@ export class SessionManager {
       cost: 0,
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
     };
+  }
+
+  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string): Promise<void> {
+    const assistant = this.newAssistantMessage(s, parentID);
     const record: OCMessageWithParts = { info: assistant, parts: [] };
     s.messages?.push(record);
     s.turn = { message: assistant, record, blocks: new Map(), tools: new Map(), scripts: new Map() };
