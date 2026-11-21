@@ -126,6 +126,13 @@ export interface OCToolPart {
   state: OCToolState;
 }
 
+export interface OCTodo {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+  priority: "high" | "medium" | "low";
+}
+
 /** Marks the user message that triggered a compaction (OpenChamber shows it as /compact). */
 export interface OCCompactionPart {
   id: string;
@@ -152,6 +159,7 @@ export type OCEvent =
   | { type: "session.status"; properties: { sessionID: string; status: OCSessionStatus } }
   | { type: "session.idle"; properties: { sessionID: string } }
   | { type: "session.compacted"; properties: { sessionID: string } }
+  | { type: "todo.updated"; properties: { sessionID: string; todos: OCTodo[] } }
   | { type: "session.error"; properties: { sessionID?: string; error?: { name: string; data: { message: string } } } }
   | { type: "message.updated"; properties: { info: OCMessage } }
   | { type: "message.part.updated"; properties: { part: OCPart; delta?: string } }

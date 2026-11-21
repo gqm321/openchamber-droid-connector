@@ -288,6 +288,9 @@ export class AdapterServer {
           this.json(res, 200, [...msgs].reverse().find((m) => m.info.role === "assistant") ?? null);
           return;
         }
+        case "GET /todo":
+          this.json(res, 200, this.sessions.todos(sessionId!) ?? []);
+          return;
         case "POST /abort":
           this.json(res, 200, await this.sessions.abort(sessionId!));
           return;

@@ -15,7 +15,7 @@ import {
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
 import { getAgentName } from "./agent-name.js";
-import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, parseDroidSessionFile, resultText } from "./droid-map.js";
+import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
@@ -39,6 +39,7 @@ import type {
   OCSession,
   OCSessionStatus,
   OCTextPart,
+  OCTodo,
   OCToolPart,
   OCUserMessage,
 } from "./types.js";
@@ -278,6 +279,22 @@ export class SessionManager {
   messages(sessionId: string): OCMessageWithParts[] | undefined {
     const s = this.get(sessionId);
     return s ? this.ensureMessages(s) : undefined;
+  }
+
+  /** The list from the newest TodoWrite call, which is how Droid's own todo panel works. */
+  todos(sessionId: string): OCTodo[] | undefined {
+    const s = this.get(sessionId);
+    if (s === undefined) return undefined;
+    const messages = this.ensureMessages(s);
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const parts = messages[i]!.parts;
+      for (let j = parts.length - 1; j >= 0; j -= 1) {
+        const part = parts[j]!;
+        const todos = part.type === "tool" ? todosOfPart(part) : undefined;
+        if (todos !== undefined) return todos;
+      }
+    }
+    return [];
   }
 
   statuses(): Record<string, OCSessionStatus> {
@@ -701,6 +718,8 @@ export class SessionManager {
     part.state = { status: "running", input: mapped.input, title: mapped.title, time: { start: Date.now() } };
     this.emitPart(s, part);
     this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
+    const todos = todosOfPart(part);
+    if (todos !== undefined) this.emit(s.info.directory, { type: "todo.updated", properties: { sessionID: s.info.id, todos } });
   }
 
   private onToolResult(s: ManagedSession, turn: TurnState, ev: Json): void {

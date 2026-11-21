@@ -4,7 +4,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCToolPart, OCUserMessage } from "./types.js";
+import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCTodo, OCToolPart, OCUserMessage } from "./types.js";
 
 type Json = Record<string, unknown>;
 
@@ -14,6 +14,46 @@ function str(v: unknown): string | undefined {
 
 function shorten(text: string, max = 60): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+const TODO_STATUSES = new Set<string>(["pending", "in_progress", "completed", "cancelled"]);
+const TODO_PRIORITIES = new Set<string>(["high", "medium", "low"]);
+
+/**
+ * Droid's TodoWrite sends `todos` as numbered text ("1. [in_progress] Fix it");
+ * OpenCode (and so OpenChamber) wants objects. Arrays pass through normalised.
+ * Returns undefined when nothing usable was found.
+ */
+export function parseTodos(raw: unknown): OCTodo[] | undefined {
+  const todos: OCTodo[] = [];
+  if (typeof raw === "string") {
+    for (const line of raw.split("\n")) {
+      const m = /^\s*(?:\d+[.)]\s*)?\[([A-Za-z_ -]+)\]\s*(.+?)\s*$/.exec(line);
+      if (m === null) continue;
+      const status = m[1]!.trim().toLowerCase().replace(/[ -]/g, "_");
+      todos.push({ id: String(todos.length + 1), content: m[2]!, status: (TODO_STATUSES.has(status) ? status : "pending") as OCTodo["status"], priority: "medium" });
+    }
+  } else if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (item === null || typeof item !== "object") continue;
+      const t = item as Json;
+      const content = str(t.content) ?? str(t.text) ?? str(t.title);
+      if (content === undefined) continue;
+      const status = typeof t.status === "string" && TODO_STATUSES.has(t.status) ? t.status : "pending";
+      const priority = typeof t.priority === "string" && TODO_PRIORITIES.has(t.priority) ? t.priority : "medium";
+      todos.push({ id: str(t.id) ?? String(todos.length + 1), content, status: status as OCTodo["status"], priority: priority as OCTodo["priority"] });
+    }
+  } else {
+    return undefined;
+  }
+  return todos.length > 0 || Array.isArray(raw) ? todos : undefined;
+}
+
+/** The todo list a `todowrite` tool part carries, if its input holds one. */
+export function todosOfPart(part: OCToolPart): OCTodo[] | undefined {
+  if (part.tool !== "todowrite") return undefined;
+  const todos = part.state.input.todos;
+  return Array.isArray(todos) ? (todos as OCTodo[]) : undefined;
 }
 
 export interface MappedTool {
@@ -65,6 +105,12 @@ export function mapTool(name: string, input: Json): MappedTool {
       return { tool: "websearch", input: { ...input }, title: shorten(str(input.query) ?? "websearch") };
     case "Task":
       return { tool: "task", input: { ...input }, title: shorten(str(input.description) ?? "task") };
+    case "TodoWrite": {
+      const todos = parseTodos(input.todos);
+      if (todos === undefined) return { tool: "todowrite", input: { ...input }, title: "todowrite" };
+      const done = todos.filter((t) => t.status === "completed").length;
+      return { tool: "todowrite", input: { ...input, todos }, title: `${done}/${todos.length} done` };
+    }
     default:
       return { tool: name.toLowerCase(), input: { ...input }, title: name };
   }
