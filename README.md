@@ -68,13 +68,14 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
 - Droid 的 `TodoWrite` 显示为 OpenChamber 的 todo 列表,重启后可恢复
 - `/btw`:`POST /session/{id}/fork` 与会话 `metadata`
+- 附件:图片(png/jpeg/gif/webp)、PDF、文本类文件直接交给 Droid;其他类型存到临时目录并把路径告诉模型。用户消息回显附件,重启后历史也能还原(图片的文件名 Droid 不保存,恢复后不显示)
 
 ## 已知缺口
 
 - revert、share、文件 diff 为桩实现(diff 返回 501)
 - Droid 的 AskUser 未映射到 question 事件
 - `script_only` 下看不到脚本源码与 `console.log` 输出(需要给 OpenChamber 前端打补丁)
-- 仅文本 parts,不处理图片/文件附件
+- 附件只处理 v1 接口(OpenChamber 1.24.x);v2 `/prompt` 接口未处理附件
 - 只在 OpenChamber 1.24.x 验证,未测 2.x
 
 ## 测试(需真实 droid)

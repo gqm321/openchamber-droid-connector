@@ -144,7 +144,18 @@ export interface OCCompactionPart {
   auto: boolean;
 }
 
-export type OCPart = OCTextPart | OCReasoningPart | OCToolPart | OCCompactionPart;
+/** An attachment on a user message; `url` is a data URL for uploads. */
+export interface OCFilePart {
+  id: string;
+  sessionID: string;
+  messageID: string;
+  type: "file";
+  mime: string;
+  filename?: string;
+  url: string;
+}
+
+export type OCPart = OCTextPart | OCReasoningPart | OCToolPart | OCCompactionPart | OCFilePart;
 
 export interface OCMessageWithParts {
   info: OCMessage;

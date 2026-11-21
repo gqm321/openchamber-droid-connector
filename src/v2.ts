@@ -501,7 +501,7 @@ export class V2EventTranslator {
   }
 
   private onPartUpdated(directory: string, part: OCPart, delta?: string): V2Envelope[] {
-    if (part.type === "compaction") return [];
+    if (part.type === "compaction" || part.type === "file") return [];
     return part.type === "tool" ? this.onToolPart(directory, part) : this.onTextPart(directory, part, delta);
   }
 

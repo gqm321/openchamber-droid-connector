@@ -73,7 +73,7 @@ function toOCModel(m: ModelInfo, contextLimit: number): OCv2Model {
       reasoning,
       attachment: image,
       toolcall: true,
-      input: { text: true, audio: false, image, video: false, pdf: false },
+      input: { text: true, audio: false, image, video: false, pdf: image },
       output: { text: true, audio: false, image: m.supportsImageGeneration === true, video: false, pdf: false },
       interleaved: reasoning,
     },

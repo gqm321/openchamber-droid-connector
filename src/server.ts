@@ -8,6 +8,7 @@ import { appendFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
 import { SessionManager } from "./sessions.js";
+import { attachmentsOf } from "./attachments.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
 import {
@@ -277,7 +278,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant).catch(() => undefined);
+          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts)).catch(() => undefined);
           res.writeHead(204).end();
           return;
         }
@@ -287,7 +288,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant);
+          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts));
           await this.sessions.waitForTurn(sessionId!);
           const msgs = this.sessions.messages(sessionId!) ?? [];
           this.json(res, 200, [...msgs].reverse().find((m) => m.info.role === "assistant") ?? null);

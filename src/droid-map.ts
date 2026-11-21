@@ -5,6 +5,7 @@
 
 import { readFileSync } from "node:fs";
 import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCTodo, OCToolPart, OCUserMessage } from "./types.js";
+import { dataUrl, parseAttachmentNote, readStoredFile } from "./attachments.js";
 
 type Json = Record<string, unknown>;
 
@@ -137,6 +138,29 @@ export function resultText(content: unknown): string {
   return content
     .map((b) => (b !== null && typeof b === "object" && typeof (b as { text?: unknown }).text === "string" ? (b as { text: string }).text : ""))
     .join("");
+}
+
+/** Images and documents on a stored user message, as the data URLs OpenChamber shows. */
+function userAttachments(blocks: Json[]): Array<{ mime: string; filename?: string; url: string }> {
+  const out: Array<{ mime: string; filename?: string; url: string }> = [];
+  for (const b of blocks) {
+    const src = b.source as Json | undefined;
+    if (src === undefined) continue;
+    // Large documents are stored as a file next to the session, with an empty `data`.
+    const stored = typeof src.data !== "string" || src.data === "" ? (typeof src.path === "string" ? readStoredFile(src.path) : undefined) : undefined;
+    const data = stored !== undefined ? stored.toString("base64") : src.data;
+    if (typeof data !== "string" || data === "") continue;
+    const mime = str(src.media_type) ?? str(src.mediaType);
+    if (b.type === "image" && mime !== undefined) {
+      out.push({ mime, url: dataUrl(mime, data) });
+    } else if (b.type === "document") {
+      const name = str(src.name);
+      const isText = src.type === "text";
+      const type = isText ? "text/plain" : (mime ?? "application/pdf");
+      out.push({ mime: type, ...(name !== undefined ? { filename: name } : {}), url: dataUrl(type, isText ? Buffer.from(data, "utf8").toString("base64") : data) });
+    }
+  }
+  return out;
 }
 
 export const COMPACTED_FALLBACK_TEXT = "Session compacted";
@@ -345,11 +369,15 @@ export function parseDroidSessionFile(
       if (blocks.some((b) => b.type === "tool_result")) continue;
       // injected context and Droid's own notices (e.g. "history has been compacted"), not something the user typed
       if (e.id.startsWith("context-") || e.id.startsWith("__internal__")) continue;
-      const text = blocks
-        .map((b) => (b.type === "text" && typeof b.text === "string" ? b.text : ""))
-        .join("")
-        .trim();
-      if (text === "" || text.startsWith("<system-reminder>")) continue;
+      // Droid adds its own <system-reminder> blocks (e.g. local paths of attached images) next to what the user typed.
+      const typed = parseAttachmentNote(
+        blocks
+          .map((b) => (b.type === "text" && typeof b.text === "string" && !b.text.trimStart().startsWith("<system-reminder>") ? b.text : ""))
+          .join(""),
+      );
+      const text = typed.text.trim();
+      const attachments = [...userAttachments(blocks), ...typed.saved];
+      if (text === "" && attachments.length === 0) continue;
       const info: OCUserMessage = {
         id: `msg_${safeId(e.id)}`,
         sessionID,
@@ -360,9 +388,13 @@ export function parseDroidSessionFile(
       };
       lastUserId = info.id;
       current = undefined;
+      const uid = safeId(e.id);
       out.push({
         info,
-        parts: [{ id: `prt_${safeId(e.id)}_0`, sessionID, messageID: info.id, type: "text", text, time: { start: when, end: when } }],
+        parts: [
+          ...(text !== "" ? [{ id: `prt_${uid}_0`, sessionID, messageID: info.id, type: "text" as const, text, time: { start: when, end: when } }] : []),
+          ...attachments.map((a, i): OCPart => ({ id: `prt_${uid}_f${i}`, sessionID, messageID: info.id, type: "file", mime: a.mime, ...(a.filename !== undefined ? { filename: a.filename } : {}), url: a.url })),
+        ],
       });
       continue;
     }

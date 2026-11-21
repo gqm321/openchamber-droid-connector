@@ -14,6 +14,7 @@ import {
   type DroidSession,
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
+import { prepareAttachments, type Attachment, type PreparedAttachments } from "./attachments.js";
 import { getAgentName } from "./agent-name.js";
 import { COMPACTED_FALLBACK_TEXT, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
 import {
@@ -420,9 +421,11 @@ export class SessionManager {
     noReply = false,
     messageID?: string,
     variant?: string,
+    attachments: Attachment[] = [],
   ): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
+    const media = prepareAttachments(attachments);
 
     // Resuming a dormant session and switching model can take several seconds.
     // The UI treats "idle with an unanswered user message" as a lost prompt after
@@ -459,11 +462,15 @@ export class SessionManager {
         agent: getAgentName(),
         model: s.model ?? model ?? { providerID: PROVIDER_ID, modelID: "unknown" },
       };
-      const parts: OCPart[] = [{ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "text", text }];
+      const parts: OCPart[] = text !== "" ? [{ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "text", text }] : [];
+      for (const att of attachments) {
+        parts.push({ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "file", mime: att.mime, ...(att.filename !== undefined ? { filename: att.filename } : {}), url: att.url });
+      }
       s.messages?.push({ info: userMsg, parts });
       s.info.time.updated = Date.now();
-      if (s.info.title === "New session") {
-        s.info.title = text.slice(0, 60);
+      const titleText = text.trim() !== "" ? text : (attachments[0]?.filename ?? "");
+      if (s.info.title === "New session" && titleText !== "") {
+        s.info.title = titleText.slice(0, 60);
         this.emit(s.info.directory, { type: "session.updated", properties: { info: s.info } });
       }
       this.emit(s.info.directory, { type: "message.updated", properties: { info: userMsg } });
@@ -478,7 +485,7 @@ export class SessionManager {
         if (s.turn !== undefined || s.status.type !== "idle" || s.preparing === true) throw new Error("session is busy");
       }
       s.preparing = false;
-      s.turnDone = this.runTurn(s, droid, text, userMsg.id);
+      s.turnDone = this.runTurn(s, droid, text + media.note, userMsg.id, media);
     } catch (err) {
       if (owner) {
         s.preparing = false;
@@ -726,7 +733,7 @@ export class SessionManager {
     };
   }
 
-  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string): Promise<void> {
+  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string, media?: PreparedAttachments): Promise<void> {
     const assistant = this.newAssistantMessage(s, parentID);
     const record: OCMessageWithParts = { info: assistant, parts: [] };
     s.messages?.push(record);
@@ -736,7 +743,15 @@ export class SessionManager {
 
     let finish = "stop";
     try {
-      for await (const ev of droid.stream(text, { includePartialMessages: true })) {
+      const hasMedia = media !== undefined && (media.images.length > 0 || media.files.length > 0);
+      // Droid rejects an empty prompt, and an attachment alone is a valid message.
+      const prompt = text.trim() === "" && hasMedia ? "See the attached file." : text;
+      const options = {
+        includePartialMessages: true as const,
+        ...(media !== undefined && media.images.length > 0 ? { images: media.images } : {}),
+        ...(media !== undefined && media.files.length > 0 ? { files: media.files } : {}),
+      };
+      for await (const ev of droid.stream(prompt, options)) {
         const r = this.onDroidEvent(s, ev as unknown as Json);
         if (r !== undefined) finish = r;
       }
