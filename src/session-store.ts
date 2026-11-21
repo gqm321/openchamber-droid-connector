@@ -198,6 +198,31 @@ export function findSessionFile(droidSessionId: string, directory?: string): str
   return undefined;
 }
 
+/** Size of the last model call Droid recorded for a session, i.e. its current context. */
+export interface LastCallUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+}
+
+export function readLastCallUsage(sessionFile: string): LastCallUsage | undefined {
+  try {
+    const settings = JSON.parse(readFileSync(sessionFile.replace(/\.jsonl$/, ".settings.json"), "utf8")) as { lastCallTokenUsage?: Record<string, unknown> };
+    return lastCallUsage(settings.lastCallTokenUsage);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Droid's `lastCallTokenUsage` object to our shape; all-zero means no call has completed yet. */
+export function lastCallUsage(raw: unknown): LastCallUsage | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+  const usage = { input: num(r.inputTokens), output: num(r.outputTokens), cacheRead: num(r.cacheReadTokens) };
+  return usage.input + usage.output + usage.cacheRead > 0 ? usage : undefined;
+}
+
 /** Delete a Droid session's transcript, settings and their `.bak` copies. */
 export function removeDroidSessionFiles(droidSessionId: string, directory?: string): void {
   const file = findSessionFile(droidSessionId, directory);

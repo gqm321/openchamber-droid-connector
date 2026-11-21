@@ -24,8 +24,11 @@ import {
   removeDroidSessionFiles,
   scanAllDroidSessions,
   scanDroidSessions,
+  lastCallUsage,
+  readLastCallUsage,
   scanSessionFile,
   SessionStore,
+  type LastCallUsage,
   type ScannedSession,
 } from "./session-store.js";
 import type {
@@ -57,6 +60,10 @@ function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
+function usageToTokens(u: LastCallUsage): OCAssistantMessage["tokens"] {
+  return { input: u.input, output: u.output, reasoning: 0, cache: { read: u.cacheRead, write: 0 } };
+}
+
 function autonomy(): AutonomyLevel {
   switch (process.env.OCDROID_AUTONOMY?.trim().toLowerCase()) {
     case "off":
@@ -84,18 +91,7 @@ interface TurnState {
    * did not show, so each action appears once.
    */
   scripts: Map<string, { input: Json; nested: Set<string> }>;
-  tokenBase: Tokens;
 }
-
-interface Tokens {
-  input: number;
-  output: number;
-  reasoning: number;
-  cacheRead: number;
-  cacheWrite: number;
-}
-
-const ZERO_TOKENS: Tokens = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0 };
 
 interface PendingPermission {
   request: OCPermissionRequest;
@@ -113,7 +109,6 @@ export interface ManagedSession {
   status: OCSessionStatus;
   model: OCModelRef | undefined;
   turn: TurnState | undefined;
-  tokens: Tokens;
   /** The user renamed the session; Droid's auto-title must not override it. */
   titleLocked: boolean;
   pending: Map<string, PendingPermission>;
@@ -178,7 +173,6 @@ export class SessionManager {
       status: { type: "idle" },
       model: undefined,
       turn: undefined,
-      tokens: { ...ZERO_TOKENS },
       titleLocked: title !== undefined && title !== "",
       pending: new Map(),
       dormant: false,
@@ -186,6 +180,7 @@ export class SessionManager {
     };
     holder.s = managed;
     await this.configure(droid);
+    this.watchUsage(managed, droid);
     this.sessions.set(info.id, managed);
 
     this.emit(directory, { type: "session.created", properties: { info } });
@@ -209,6 +204,26 @@ export class SessionManager {
       .catch((err: unknown) => console.error("[droid] could not apply session settings:", err instanceof Error ? err.message : err));
   }
 
+  /**
+   * Droid's stream only carries session-wide running totals, which grow past the
+   * model's window and say nothing about context size. The raw notification also
+   * has `lastCallTokenUsage`, the size of the latest model call, which is what
+   * OpenCode records per message and what OpenChamber divides by the context limit.
+   */
+  private watchUsage(s: ManagedSession, droid: DroidSession): void {
+    droid.onNotification((n) => {
+      const inner = (n.params as { notification?: Json } | undefined)?.notification;
+      if (inner?.type !== "session_token_usage_changed") return;
+      const turn = s.turn;
+      const usage = lastCallUsage(inner.lastCallTokenUsage);
+      if (turn === undefined || usage === undefined) return;
+      const before = turn.message.tokens;
+      if (before.input === usage.input && before.output === usage.output && before.cache.read === usage.cacheRead) return;
+      turn.message.tokens = usageToTokens(usage);
+      this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
+    });
+  }
+
   /** Spawn a droid process for a dormant session and adopt it as live. */
   private async revive(s: ManagedSession): Promise<DroidSession> {
     if (s.droid !== undefined) return s.droid;
@@ -217,6 +232,7 @@ export class SessionManager {
       permissionHandler: (p) => this.onPermission(holder.s, p),
     });
     await this.configure(droid);
+    this.watchUsage(s, droid);
     s.droid = droid;
     s.dormant = false;
     this.ensureMessages(s);
@@ -471,6 +487,10 @@ export class SessionManager {
     this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
     try {
       await droid.compact();
+      // The next model call will report the real size; until then Droid's estimate
+      // keeps the pre-compaction figure from lingering.
+      const stats = await droid.getContextStats().catch(() => undefined);
+      if (stats !== undefined && stats.used > 0) record.tokens = usageToTokens({ input: stats.used, output: 0, cacheRead: 0 });
       const file = findSessionFile(s.droidSessionId, s.info.directory);
       const written = file === undefined ? undefined : latestCompactionSummary(file);
       const now = Date.now();
@@ -523,7 +543,7 @@ export class SessionManager {
     };
     const record: OCMessageWithParts = { info: assistant, parts: [] };
     s.messages?.push(record);
-    s.turn = { message: assistant, record, blocks: new Map(), tools: new Map(), scripts: new Map(), tokenBase: { ...s.tokens } };
+    s.turn = { message: assistant, record, blocks: new Map(), tools: new Map(), scripts: new Map() };
     this.setStatus(s, { type: "busy" });
     this.emit(s.info.directory, { type: "message.updated", properties: { info: assistant } });
 
@@ -547,7 +567,6 @@ export class SessionManager {
       this.finalizeDanglingTools(s, turn);
       turn.message.time.completed = Date.now();
       turn.message.finish = finish;
-      this.applyTurnTokens(s, turn);
       this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
       s.turn = undefined;
     }
@@ -587,17 +606,6 @@ export class SessionManager {
       case "assistant":
         this.onAssistantMessage(s, turn, ev.message as Json | undefined);
         return undefined;
-      case "token_usage_update": {
-        s.tokens = {
-          input: Number(ev.inputTokens ?? 0),
-          output: Number(ev.outputTokens ?? 0),
-          reasoning: Number(ev.thinkingTokens ?? 0),
-          cacheRead: Number(ev.cacheReadTokens ?? 0),
-          cacheWrite: Number(ev.cacheCreationTokens ?? 0),
-        };
-        this.applyTurnTokens(s, turn);
-        return undefined;
-      }
       case "session_title_updated": {
         const title = typeof ev.title === "string" ? ev.title : "";
         if (title !== "" && !s.titleLocked && title !== s.info.title) {
@@ -620,16 +628,6 @@ export class SessionManager {
       default:
         return undefined;
     }
-  }
-
-  private applyTurnTokens(s: ManagedSession, turn: TurnState): void {
-    const sub = (a: number, b: number): number => Math.max(0, a - b);
-    turn.message.tokens = {
-      input: sub(s.tokens.input, turn.tokenBase.input),
-      output: sub(s.tokens.output, turn.tokenBase.output),
-      reasoning: sub(s.tokens.reasoning, turn.tokenBase.reasoning),
-      cache: { read: sub(s.tokens.cacheRead, turn.tokenBase.cacheRead), write: sub(s.tokens.cacheWrite, turn.tokenBase.cacheWrite) },
-    };
   }
 
   private onBlockDelta(s: ManagedSession, turn: TurnState, kind: "text" | "reasoning", ev: Json): void {
@@ -839,6 +837,11 @@ export class SessionManager {
         file === undefined
           ? []
           : parseDroidSessionFile(file, s.info.id, s.info.directory, getAgentName(), s.model ?? { providerID: PROVIDER_ID, modelID: "unknown" }, PROVIDER_ID);
+      // Only the newest assistant message gets the size: it is the one the UI reads. A
+      // compaction summary last means the recorded call predates it, so leave it empty.
+      const last = s.messages.at(-1)?.info;
+      const usage = file === undefined ? undefined : readLastCallUsage(file);
+      if (last?.role === "assistant" && last.summary !== true && usage !== undefined) last.tokens = usageToTokens(usage);
     }
     return s.messages;
   }
@@ -890,7 +893,6 @@ export class SessionManager {
       status: { type: "idle" },
       model: reg?.model !== undefined ? { providerID: reg.model.providerID, modelID: reg.model.modelID } : undefined,
       turn: undefined,
-      tokens: { ...ZERO_TOKENS },
       titleLocked: reg?.title !== undefined,
       pending: new Map(),
       dormant: true,
