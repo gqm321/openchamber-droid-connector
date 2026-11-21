@@ -24,6 +24,7 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -195,6 +196,20 @@ export function findSessionFile(droidSessionId: string, directory?: string): str
     /* no sessions dir yet */
   }
   return undefined;
+}
+
+/** Delete a Droid session's transcript, settings and their `.bak` copies. */
+export function removeDroidSessionFiles(droidSessionId: string, directory?: string): void {
+  const file = findSessionFile(droidSessionId, directory);
+  if (file === undefined) return;
+  for (const suffix of ["", ".bak"].flatMap((b) => [`.jsonl${b}`, `.settings.json${b}`])) {
+    const p = file.replace(/\.jsonl$/, suffix);
+    try {
+      if (existsSync(p)) unlinkSync(p);
+    } catch {
+      /* already gone */
+    }
+  }
 }
 
 /**

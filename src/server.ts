@@ -51,6 +51,11 @@ function numberParam(value: string | null): number | undefined {
   return Number.isFinite(n) && n >= 0 ? n : undefined;
 }
 
+/** v2 model refs carry `variant` (the reasoning effort) next to the model id. */
+function variantFromBody(model: { variant?: unknown } | undefined): string | undefined {
+  return typeof model?.variant === "string" && model.variant !== "" ? model.variant : undefined;
+}
+
 /** v2 prompt bodies carry `model:{providerID, id|modelID}`; adapt to OCModelRef. */
 function modelRefFromBody(model: { providerID?: string; id?: string; modelID?: string } | undefined): OCModelRef | undefined {
   if (!model || typeof model.providerID !== "string") return undefined;
@@ -77,6 +82,7 @@ export class AdapterServer {
 
   constructor(private options: AdapterServerOptions) {
     this.sessions = new SessionManager((directory, event) => this.broadcast(directory, event), undefined, options.defaultDirectory);
+    this.sessions.setEffortResolver(async (modelID) => (await this.catalog()).efforts?.[modelID]);
     this.server = createServer((req, res) => void this.route(req, res));
   }
 
@@ -95,6 +101,9 @@ export class AdapterServer {
     });
     const addr = this.server.address();
     this.actualPort = typeof addr === "object" && addr !== null ? addr.port : this.options.port;
+    // Loading the catalog probes every model's context size (a few seconds); start it
+    // now so the first model-list request does not pay for it.
+    void this.catalog();
   }
 
   get url(): string {
@@ -263,7 +272,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID).catch(() => undefined);
+          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant).catch(() => undefined);
           res.writeHead(204).end();
           return;
         }
@@ -273,7 +282,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID);
+          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant);
           await this.sessions.waitForTurn(sessionId!);
           const msgs = this.sessions.messages(sessionId!) ?? [];
           this.json(res, 200, [...msgs].reverse().find((m) => m.info.role === "assistant") ?? null);
@@ -282,6 +291,17 @@ export class AdapterServer {
         case "POST /abort":
           this.json(res, 200, await this.sessions.abort(sessionId!));
           return;
+        case "POST /summarize": {
+          const body = (await this.body(req)) as { providerID?: string; modelID?: string } | undefined;
+          const ref = modelRefFromBody(body);
+          try {
+            await this.sessions.compact(sessionId!, ref);
+            this.json(res, 200, true);
+          } catch (err) {
+            this.compactFailed(res, sessionId!, err);
+          }
+          return;
+        }
         default:
           this.json(res, 501, { name: "NotImplemented", data: { message: `${method} ${path} not implemented (M1)` } });
           return;
@@ -679,13 +699,13 @@ export class AdapterServer {
           const body = (await this.body(req)) as {
             id?: string;
             text?: string;
-            model?: { providerID?: string; id?: string; modelID?: string };
+            model?: { providerID?: string; id?: string; modelID?: string; variant?: string };
             delivery?: string;
           };
           const text = typeof body.text === "string" ? body.text : "";
           const messageID = typeof body.id === "string" && body.id !== "" ? body.id : `msg_${randomUUID().replaceAll("-", "")}`;
           const model = modelRefFromBody(body.model);
-          void this.sessions.prompt(sessionId, text, model, false, messageID).catch((err) => {
+          void this.sessions.prompt(sessionId, text, model, false, messageID, variantFromBody(body.model)).catch((err) => {
             console.error(`[prompt] session ${sessionId} failed:`, err);
           });
           const delivery = typeof body.delivery === "string" ? body.delivery : "steer";
@@ -700,6 +720,15 @@ export class AdapterServer {
               delivery,
             },
           });
+          return;
+        }
+        case "POST /compact": {
+          try {
+            await this.sessions.compact(sessionId);
+            res.writeHead(204).end();
+          } catch (err) {
+            this.compactFailed(res, sessionId, err);
+          }
           return;
         }
         case "POST /interrupt": {
@@ -718,14 +747,14 @@ export class AdapterServer {
           // to Droid. Dropping the body used to leave the UI showing a model Droid
           // never ran. 204 empty is the contract; 400/404 are the statuses the
           // client declares, and a loud failure beats a silent drift.
-          const body = (await this.body(req)) as { model?: { providerID?: string; id?: string; modelID?: string } };
+          const body = (await this.body(req)) as { model?: { providerID?: string; id?: string; modelID?: string; variant?: string } };
           const ref = modelRefFromBody(body.model);
           if (ref === undefined) {
             this.json(res, 400, { error: "model is required: {providerID, modelID}" });
             return;
           }
           try {
-            const resolved = await this.sessions.setModel(sessionId, ref);
+            const resolved = await this.sessions.setModel(sessionId, ref, variantFromBody(body.model));
             if (resolved.modelID !== ref.modelID || resolved.providerID !== ref.providerID) {
               // Droid resolved the request to a different concrete model (alias or
               // provider-reported id). Not an error, but the reason the UI ends
@@ -764,6 +793,13 @@ export class AdapterServer {
     }
 
     this.json(res, 404, { name: "NotFoundError", data: { message: `no route: ${method} ${path}` } });
+  }
+
+  private compactFailed(res: ServerResponse, sessionId: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[compact] session ${sessionId} failed:`, message);
+    const busy = message === "session is busy";
+    this.json(res, busy ? 400 : 500, { name: busy ? "BadRequest" : "UnknownError", data: { message } });
   }
 
   private json(res: ServerResponse, status: number, body: unknown): void {

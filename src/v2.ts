@@ -70,7 +70,8 @@ interface CatalogModelLike {
   id: string;
   providerID: string;
   name: string;
-  capabilities: { input: Record<string, boolean> };
+  capabilities: { input: Record<string, boolean>; output?: Record<string, boolean> };
+  variants?: Record<string, Record<string, unknown>>;
   cost: { input: number; output: number; cache: { read: number; write: number } };
   limit: { context: number; output: number };
 }
@@ -88,17 +89,22 @@ export interface CatalogLike {
   default?: { providerID: string; modelID: string };
 }
 
-function toV2Model(m: CatalogModelLike): V2Model {
-  const inputs = Object.entries(m.capabilities.input)
+function enabledModalities(flags: Record<string, boolean> | undefined): string[] {
+  return Object.entries(flags ?? {})
     .filter(([, on]) => on === true)
     .map(([name]) => name);
+}
+
+function toV2Model(m: CatalogModelLike): V2Model {
+  const inputs = enabledModalities(m.capabilities.input);
+  const outputs = enabledModalities(m.capabilities.output);
   return {
     id: m.id,
     modelID: m.id,
     providerID: m.providerID,
     name: m.name,
-    capabilities: { tools: true, input: inputs.length > 0 ? inputs : ["text"], output: ["text"] },
-    variants: [],
+    capabilities: { tools: true, input: inputs.length > 0 ? inputs : ["text"], output: outputs.length > 0 ? outputs : ["text"] },
+    variants: Object.entries(m.variants ?? {}).map(([id, settings]) => ({ id, settings })),
     time: { released: 0 },
     cost: [{ input: m.cost.input, output: m.cost.output, cache: { read: m.cost.cache.read, write: m.cost.cache.write } }],
     status: "active",
@@ -189,10 +195,12 @@ export interface V2Message {
 
 /** v2 user message (list + prompt response): the UI reads `.text`. */
 export function toV2UserMessage(info: OCMessageWithParts): V2Message {
-  const text = info.parts
-    .filter((p): p is Extract<OCPart, { type: "text" }> => p.type === "text")
-    .map((p) => p.text)
-    .join("");
+  const text = info.parts.some((p) => p.type === "compaction")
+    ? "/compact"
+    : info.parts
+        .filter((p): p is Extract<OCPart, { type: "text" }> => p.type === "text")
+        .map((p) => p.text)
+        .join("");
   return {
     id: info.info.id,
     time: { created: info.info.time.created },
@@ -221,7 +229,7 @@ export function toV2AssistantMessage(info: OCMessageWithParts): V2Message {
           ...(part.time?.end !== undefined ? { completed: part.time.end } : {}),
         },
       });
-    } else {
+    } else if (part.type === "tool") {
       content.push(toolContent(part));
     }
   }
@@ -493,9 +501,8 @@ export class V2EventTranslator {
   }
 
   private onPartUpdated(directory: string, part: OCPart, delta?: string): V2Envelope[] {
-    return part.type === "tool"
-      ? this.onToolPart(directory, part)
-      : this.onTextPart(directory, part, delta);
+    if (part.type === "compaction") return [];
+    return part.type === "tool" ? this.onToolPart(directory, part) : this.onTextPart(directory, part, delta);
   }
 
   private onTextPart(directory: string, part: Extract<OCPart, { type: "text" | "reasoning" }>, delta?: string): V2Envelope[] {

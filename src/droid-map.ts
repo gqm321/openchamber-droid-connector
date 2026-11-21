@@ -79,10 +79,80 @@ export function resultText(content: unknown): string {
     .join("");
 }
 
+export const COMPACTED_FALLBACK_TEXT = "Session compacted";
+
+export interface CompactionMessageOptions {
+  sessionID: string;
+  directory: string;
+  agentName: string;
+  model: OCModelRef;
+  userId: string;
+  summaryId: string;
+  userPartId: string;
+  created: number;
+}
+
+/**
+ * OpenCode's shape for a compaction: a user message carrying a `compaction`
+ * part (OpenChamber shows it as /compact) answered by an assistant message
+ * flagged `summary` whose text is the summary. The caller adds that text part.
+ */
+export function compactionMessages(o: CompactionMessageOptions): { user: OCMessageWithParts; summary: OCMessageWithParts } {
+  const user: OCUserMessage = {
+    id: o.userId,
+    sessionID: o.sessionID,
+    role: "user",
+    time: { created: o.created },
+    agent: o.agentName,
+    model: o.model,
+  };
+  const summary: OCAssistantMessage = {
+    id: o.summaryId,
+    sessionID: o.sessionID,
+    role: "assistant",
+    time: { created: o.created },
+    parentID: o.userId,
+    modelID: o.model.modelID,
+    providerID: o.model.providerID,
+    mode: "compaction",
+    path: { cwd: o.directory, root: o.directory },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    summary: true,
+  };
+  return {
+    user: { info: user, parts: [{ id: o.userPartId, sessionID: o.sessionID, messageID: o.userId, type: "compaction", auto: false }] },
+    summary: { info: summary, parts: [] },
+  };
+}
+
+/** Text of the newest `compaction_state` record in a Droid session file. */
+export function latestCompactionSummary(path: string): { id: string; text: string } | undefined {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return undefined;
+  }
+  const lines = raw.split("\n");
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i]!;
+    if (!line.includes('"compaction_state"')) continue;
+    try {
+      const e = JSON.parse(line) as FileEntry;
+      if (e.type === "compaction_state" && typeof e.id === "string") return { id: e.id, text: typeof e.summaryText === "string" ? e.summaryText : "" };
+    } catch {
+      /* torn trailing write */
+    }
+  }
+  return undefined;
+}
+
 interface FileEntry {
   type?: string;
   id?: string;
   timestamp?: string;
+  summaryText?: string;
   message?: {
     role?: string;
     content?: Array<Json> | string;
@@ -124,6 +194,7 @@ export function parseDroidSessionFile(
   const toolParts = new Map<string, OCToolPart>();
   /** Script wrapper tool_use id to the ids of calls nested inside it. */
   const scriptNested = new Map<string, number>();
+  const seenCompactions = new Set<string>();
   let lastUserId = "";
   let current: { info: OCAssistantMessage; parts: OCPart[] } | undefined;
   let model = fallbackModel;
@@ -135,6 +206,30 @@ export function parseDroidSessionFile(
       e = JSON.parse(line) as FileEntry;
     } catch {
       continue; // torn trailing write
+    }
+    if (e.type === "compaction_state" && typeof e.id === "string" && !seenCompactions.has(e.id)) {
+      seenCompactions.add(e.id);
+      const when = entryTime(e);
+      const key = safeId(e.id);
+      const { user, summary } = compactionMessages({
+        sessionID,
+        directory,
+        agentName,
+        model,
+        userId: `msg_compaction_${key}`,
+        summaryId: `msg_compaction_${key}_summary`,
+        userPartId: `prt_compaction_${key}`,
+        created: when,
+      });
+      const text = typeof e.summaryText === "string" && e.summaryText.trim() !== "" ? e.summaryText : COMPACTED_FALLBACK_TEXT;
+      const summaryInfo = summary.info as OCAssistantMessage;
+      summaryInfo.time.completed = when;
+      summaryInfo.finish = "stop";
+      summary.parts.push({ id: `prt_compaction_${key}_summary`, sessionID, messageID: summary.info.id, type: "text", text, time: { start: when, end: when } });
+      out.push(user, summary);
+      lastUserId = user.info.id;
+      current = undefined;
+      continue;
     }
     if (e.type !== "message" || e.message === undefined || typeof e.id !== "string") continue;
     const m = e.message;
@@ -154,7 +249,8 @@ export function parseDroidSessionFile(
             : { status: "completed", input: part.state.input, output: text, title: part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool, metadata: {}, time: { start, end: when } };
       }
       if (blocks.some((b) => b.type === "tool_result")) continue;
-      if (e.id.startsWith("context-")) continue; // injected context, not something the user typed
+      // injected context and Droid's own notices (e.g. "history has been compacted"), not something the user typed
+      if (e.id.startsWith("context-") || e.id.startsWith("__internal__")) continue;
       const text = blocks
         .map((b) => (b.type === "text" && typeof b.text === "string" ? b.text : ""))
         .join("")

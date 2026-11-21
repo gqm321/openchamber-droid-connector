@@ -3,6 +3,16 @@
 # Only the `serve` subcommand is implemented; everything else errors clearly.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 PKG_DIR="$SCRIPT_DIR/.."
+
+# The droid SDK requires a Factory API key; it cannot reuse the droid CLI's
+# keyring login. Load it from a local file (created by the deploy step) unless
+# already present in the environment.
+KEY_FILE="${OCDROID_KEY_FILE:-$HOME/.config/openchamber-droid-connector/api-key}"
+if [ -z "${FACTORY_API_KEY:-}" ] && [ -f "$KEY_FILE" ]; then
+  FACTORY_API_KEY="$(tr -d ' \t\r\n' < "$KEY_FILE")"
+  export FACTORY_API_KEY
+fi
+
 if [ "$1" = "serve" ]; then
   shift
   exec "$PKG_DIR/node_modules/.bin/tsx" "$PKG_DIR/src/cli.ts" serve "$@"

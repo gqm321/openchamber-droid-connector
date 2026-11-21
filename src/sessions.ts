@@ -6,7 +6,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, unlinkSync } from "node:fs";
 import {
   AutonomyLevel,
   ToolConfirmationOutcome,
@@ -16,12 +15,13 @@ import {
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
 import { getAgentName } from "./agent-name.js";
-import { mapTool, parseDroidSessionFile, resultText } from "./droid-map.js";
+import { COMPACTED_FALLBACK_TEXT, compactionMessages, latestCompactionSummary, mapTool, parseDroidSessionFile, resultText } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
   findSessionFile,
   ocIdFor,
+  removeDroidSessionFiles,
   scanAllDroidSessions,
   scanDroidSessions,
   scanSessionFile,
@@ -123,11 +123,19 @@ export interface ManagedSession {
 
 type EventSink = (directory: string, event: OCEvent) => void;
 
+/** Reasoning efforts a model accepts, as reported by Droid's model list. */
+export interface ModelEfforts {
+  supported: string[];
+  default: string;
+}
+export type EffortResolver = (modelID: string) => Promise<ModelEfforts | undefined>;
+
 export class SessionManager {
   private sessions = new Map<string, ManagedSession>();
   private readonly store: SessionStore;
   private scanCache = new Map<string, { mtimeMs: number; at: number }>();
   private scanAllCache: { mtimeMs: number; at: number } | undefined;
+  private resolveEfforts: EffortResolver | undefined;
 
   constructor(
     private emit: EventSink,
@@ -240,17 +248,7 @@ export class SessionManager {
     this.emit(s.info.directory, { type: "session.deleted", properties: { info: s.info } });
     this.cancelPending(s);
     if (s.droid !== undefined) await s.droid.close().catch(() => undefined);
-    const file = findSessionFile(s.droidSessionId, s.info.directory);
-    if (file !== undefined) {
-      for (const suffix of ["", ".bak"].flatMap((b) => [`.jsonl${b}`, `.settings.json${b}`])) {
-        const p = file.replace(/\.jsonl$/, suffix);
-        try {
-          if (existsSync(p)) unlinkSync(p);
-        } catch {
-          /* already gone */
-        }
-      }
-    }
+    removeDroidSessionFiles(s.droidSessionId, s.info.directory);
     this.store.remove(sessionId);
     return true;
   }
@@ -311,14 +309,37 @@ export class SessionManager {
    * so it is the path from the model picker to Droid. Errors are not swallowed:
    * a silent no-op lets the UI and Droid disagree about the model.
    */
-  async setModel(sessionId: string, ref: OCModelRef): Promise<OCModelRef> {
+  async setModel(sessionId: string, ref: OCModelRef, variant?: string): Promise<OCModelRef> {
     const s = this.get(sessionId);
     if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
     const droid = await this.revive(s);
-    if (s.model !== undefined && s.model.modelID === ref.modelID) return s.model;
-    await droid.updateSettings({ modelId: ref.modelID });
-    this.applyModel(s, droid.settings.modelId || ref.modelID);
+    if (s.model === undefined || s.model.modelID !== ref.modelID) {
+      await droid.updateSettings({ modelId: ref.modelID });
+      this.applyModel(s, droid.settings.modelId || ref.modelID);
+    }
+    await this.applyReasoningEffort(droid, s.model?.modelID ?? ref.modelID, variant);
     return s.model ?? { providerID: PROVIDER_ID, modelID: ref.modelID };
+  }
+
+  /**
+   * The UI's "variant" is a Droid reasoning effort. No variant means the picker
+   * is on the model's default, so the effort is reset to it; otherwise a level
+   * chosen for the previous model would silently carry over.
+   */
+  private async applyReasoningEffort(droid: DroidSession, modelID: string, variant: string | undefined): Promise<void> {
+    const efforts = await this.resolveEfforts?.(modelID);
+    if (efforts === undefined) return;
+    const wanted = variant !== undefined && efforts.supported.includes(variant) ? variant : efforts.default;
+    if (droid.settings.reasoningEffort === wanted) return;
+    try {
+      await droid.updateSettings({ reasoningEffort: wanted } as Parameters<DroidSession["updateSettings"]>[0]);
+    } catch (err) {
+      console.error(`[model] could not set reasoning effort "${wanted}" for ${modelID}:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  setEffortResolver(resolver: EffortResolver): void {
+    this.resolveEfforts = resolver;
   }
 
   /** Single funnel for "Droid is now running this model": adopt, persist, tell the UI. */
@@ -340,7 +361,14 @@ export class SessionManager {
   // prompt / turn
   // ------------------------------------------------------------------
 
-  async prompt(sessionId: string, text: string, model?: OCModelRef, noReply = false, messageID?: string): Promise<void> {
+  async prompt(
+    sessionId: string,
+    text: string,
+    model?: OCModelRef,
+    noReply = false,
+    messageID?: string,
+    variant?: string,
+  ): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
     const droid = await this.revive(s);
@@ -348,7 +376,7 @@ export class SessionManager {
 
     if (model !== undefined) {
       try {
-        await this.setModel(sessionId, model);
+        await this.setModel(sessionId, model, variant);
       } catch (err) {
         this.emitError(s, err instanceof Error ? err.message : String(err));
         throw err;
@@ -379,11 +407,82 @@ export class SessionManager {
     if (noReply) return;
     // An interrupted turn needs a moment to wind down; wait for it rather than
     // failing a prompt the user sent right after pressing stop.
-    if (s.turn !== undefined) {
+    // A compaction in flight also leaves the session busy without a turn.
+    if (s.turn !== undefined || s.status.type !== "idle") {
       await Promise.race([s.turnDone, new Promise<void>((resolve) => setTimeout(resolve, 15_000))]);
-      if (s.turn !== undefined) throw new Error("session is busy");
+      if (s.turn !== undefined || s.status.type !== "idle") throw new Error("session is busy");
     }
     s.turnDone = this.runTurn(s, droid, text, userMsg.id);
+  }
+
+  /**
+   * POST /session/{id}/summarize and /api/session/{id}/compact. Droid compacts in
+   * place (same session id, a `compaction_state` record is appended), so the
+   * transcript shown in the UI is kept, as in OpenCode, while Droid's own context
+   * shrinks. `model` only switches the session when it differs from the current
+   * one: re-sending the current model would reset the chosen reasoning effort.
+   */
+  async compact(sessionId: string, model?: OCModelRef): Promise<void> {
+    const s = this.get(sessionId);
+    if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
+    if (s.turn !== undefined || s.status.type !== "idle") throw new Error("session is busy");
+    const droid = await this.revive(s);
+    if (model !== undefined && s.model?.modelID !== model.modelID) await this.setModel(sessionId, model);
+    const done = this.runCompaction(s, droid);
+    s.turnDone = done.catch(() => undefined);
+    await done;
+  }
+
+  private async runCompaction(s: ManagedSession, droid: DroidSession): Promise<void> {
+    this.setStatus(s, { type: "busy" });
+    // Same transcript shape OpenCode produces, so OpenChamber shows the /compact
+    // marker immediately and the summary once Droid has written it.
+    const { user, summary } = compactionMessages({
+      sessionID: s.info.id,
+      directory: s.info.directory,
+      agentName: getAgentName(),
+      model: s.model ?? { providerID: PROVIDER_ID, modelID: "unknown" },
+      userId: id("msg"),
+      summaryId: id("msg"),
+      userPartId: id("prt"),
+      created: Date.now(),
+    });
+    const record = summary.info as OCAssistantMessage;
+    this.ensureMessages(s).push(user, summary);
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: user.info } });
+    for (const p of user.parts) this.emitPart(s, p);
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+    try {
+      await droid.compact();
+      const file = findSessionFile(s.droidSessionId, s.info.directory);
+      const written = file === undefined ? undefined : latestCompactionSummary(file);
+      const now = Date.now();
+      const part: OCTextPart = {
+        id: id("prt"),
+        sessionID: s.info.id,
+        messageID: record.id,
+        type: "text",
+        text: written !== undefined && written.text.trim() !== "" ? written.text : COMPACTED_FALLBACK_TEXT,
+        time: { start: now, end: now },
+      };
+      summary.parts.push(part);
+      this.emitPart(s, part);
+      record.time.completed = now;
+      record.finish = "stop";
+      this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+      s.info.time.updated = now;
+      this.persistMeta(s);
+      this.emit(s.info.directory, { type: "session.compacted", properties: { sessionID: s.info.id } });
+    } catch (err) {
+      record.time.completed = Date.now();
+      record.finish = "error";
+      record.error = { name: "UnknownError", data: { message: err instanceof Error ? err.message : String(err) } };
+      this.emit(s.info.directory, { type: "message.updated", properties: { info: record } });
+      throw err;
+    } finally {
+      this.setStatus(s, { type: "idle" });
+      this.emit(s.info.directory, { type: "session.idle", properties: { sessionID: s.info.id } });
+    }
   }
 
   /** Resolves once the session's in-flight turn (if any) has finished. */

@@ -52,6 +52,8 @@ export interface OCAssistantMessage {
     cache: { read: number; write: number };
   };
   finish?: string;
+  /** OpenCode marks the assistant message that carries a compaction summary. */
+  summary?: boolean;
   error?: { name: string; data: { message: string } };
 }
 
@@ -124,7 +126,16 @@ export interface OCToolPart {
   state: OCToolState;
 }
 
-export type OCPart = OCTextPart | OCReasoningPart | OCToolPart;
+/** Marks the user message that triggered a compaction (OpenChamber shows it as /compact). */
+export interface OCCompactionPart {
+  id: string;
+  sessionID: string;
+  messageID: string;
+  type: "compaction";
+  auto: boolean;
+}
+
+export type OCPart = OCTextPart | OCReasoningPart | OCToolPart | OCCompactionPart;
 
 export interface OCMessageWithParts {
   info: OCMessage;
@@ -140,6 +151,7 @@ export type OCEvent =
   | { type: "session.deleted"; properties: { info: OCSession } }
   | { type: "session.status"; properties: { sessionID: string; status: OCSessionStatus } }
   | { type: "session.idle"; properties: { sessionID: string } }
+  | { type: "session.compacted"; properties: { sessionID: string } }
   | { type: "session.error"; properties: { sessionID?: string; error?: { name: string; data: { message: string } } } }
   | { type: "message.updated"; properties: { info: OCMessage } }
   | { type: "message.part.updated"; properties: { part: OCPart; delta?: string } }
@@ -175,6 +187,8 @@ export interface OCProject {
 export interface OCPromptBody {
   messageID?: string;
   model?: OCModelRef;
+  /** Model variant, i.e. the Droid reasoning effort. */
+  variant?: string;
   agent?: string;
   noReply?: boolean;
   system?: string;
