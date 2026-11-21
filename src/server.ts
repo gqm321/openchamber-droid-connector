@@ -52,6 +52,11 @@ function numberParam(value: string | null): number | undefined {
 }
 
 /** v2 model refs carry `variant` (the reasoning effort) next to the model id. */
+/** A PATCH `metadata` must be a plain object; anything else is ignored rather than wiping what is stored. */
+function metadataFromBody(raw: unknown): Record<string, unknown> | undefined {
+  return raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : undefined;
+}
+
 function variantFromBody(model: { variant?: unknown } | undefined): string | undefined {
   return typeof model?.variant === "string" && model.variant !== "" ? model.variant : undefined;
 }
@@ -256,8 +261,8 @@ export class AdapterServer {
           this.json(res, 200, this.sessions.get(sessionId!)!.info);
           return;
         case "PATCH ": {
-          const body = (await this.body(req)) as { title?: string; time?: { archived?: number } };
-          this.json(res, 200, this.sessions.update(sessionId!, { title: body.title, archived: body.time?.archived }));
+          const body = (await this.body(req)) as { title?: string; time?: { archived?: number }; metadata?: unknown };
+          this.json(res, 200, this.sessions.update(sessionId!, { title: body.title, archived: body.time?.archived, metadata: metadataFromBody(body.metadata) }));
           return;
         }
         case "DELETE ":
@@ -294,6 +299,20 @@ export class AdapterServer {
         case "POST /abort":
           this.json(res, 200, await this.sessions.abort(sessionId!));
           return;
+        case "POST /fork": {
+          const body = (await this.body(req)) as { messageID?: unknown } | undefined;
+          const messageID = typeof body?.messageID === "string" && body.messageID !== "" ? body.messageID : undefined;
+          try {
+            this.json(res, 200, await this.sessions.fork(sessionId!, messageID));
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error(`[fork] session ${sessionId} failed:`, message);
+            const missing = message.startsWith("unknown message:");
+            const refused = message.startsWith("forking from an earlier message");
+            this.json(res, missing ? 404 : refused ? 400 : 500, { name: missing ? "NotFoundError" : refused ? "BadRequest" : "UnknownError", data: { message } });
+          }
+          return;
+        }
         case "POST /summarize": {
           const body = (await this.body(req)) as { providerID?: string; modelID?: string } | undefined;
           const ref = modelRefFromBody(body);
@@ -679,8 +698,8 @@ export class AdapterServer {
           return;
         }
         case "PATCH ": {
-          const body = (await this.body(req)) as { title?: string; time?: { archived?: number } };
-          this.sessions.update(sessionId, { title: body.title, archived: body.time?.archived });
+          const body = (await this.body(req)) as { title?: string; time?: { archived?: number }; metadata?: unknown };
+          this.sessions.update(sessionId, { title: body.title, archived: body.time?.archived, metadata: metadataFromBody(body.metadata) });
           res.writeHead(204).end();
           return;
         }

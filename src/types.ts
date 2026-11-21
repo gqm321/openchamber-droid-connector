@@ -16,6 +16,8 @@ export interface OCSession {
   parentID?: string;
   title: string;
   version: string;
+  /** Free-form client data (OpenChamber stores btw/review links here); replaced wholesale on PATCH. */
+  metadata?: Record<string, unknown>;
   time: {
     created: number;
     updated: number;

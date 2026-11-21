@@ -274,7 +274,10 @@ export class SessionManager {
    * PATCH /session/{id}: rename and/or archive. `title` is only touched when
    * actually sent, otherwise an archive-only PATCH would blank the title.
    */
-  update(sessionId: string, patch: { title?: string | undefined; archived?: number | undefined }): OCSession | undefined {
+  update(
+    sessionId: string,
+    patch: { title?: string | undefined; archived?: number | undefined; metadata?: Record<string, unknown> | undefined },
+  ): OCSession | undefined {
     const s = this.get(sessionId);
     if (!s) return undefined;
     if (typeof patch.title === "string" && patch.title !== "") {
@@ -285,6 +288,10 @@ export class SessionManager {
     if (patch.archived !== undefined) {
       if (patch.archived > 0) s.info.time.archived = patch.archived;
       else delete s.info.time.archived;
+    }
+    if (patch.metadata !== undefined) {
+      if (Object.keys(patch.metadata).length > 0) s.info.metadata = patch.metadata;
+      else delete s.info.metadata;
     }
     s.info.time.updated = Date.now();
     this.persistMeta(s);
@@ -464,6 +471,71 @@ export class SessionManager {
     const done = this.runCompaction(s, droid);
     s.turnDone = done.catch(() => undefined);
     await done;
+  }
+
+  /**
+   * POST /session/{id}/fork, used by OpenChamber's /btw side conversations.
+   * Droid forks the whole transcript (there is no cut point), so a `messageID`
+   * is only honoured when nothing the user said comes after it; a fork from
+   * an earlier message would silently carry later turns and is refused.
+   * The new session is registered dormant, like one restored from disk, so
+   * its first prompt starts a droid process bound to the new session.
+   */
+  async fork(sessionId: string, messageID?: string): Promise<OCSession> {
+    const s = this.get(sessionId);
+    if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
+    if (messageID !== undefined) {
+      const messages = this.ensureMessages(s);
+      const at = messages.findIndex((m) => m.info.id === messageID);
+      if (at < 0) throw new Error(`unknown message: ${messageID}`);
+      if (messages.slice(at).some((m) => m.info.role === "user")) throw new Error("forking from an earlier message is not supported");
+    }
+    // Forking through the session's own handle invalidates that handle ("replaced
+    // by" the fork), which would break the parent mid-turn. A throwaway process
+    // resumed on the same session forks it and leaves the parent untouched.
+    const reader = await resumeSession(s.droidSessionId, {});
+    let droidId: string;
+    try {
+      const forked = await reader.fork({ title: this.forkTitle(s) });
+      droidId = forked.id;
+      await forked.close().catch(() => undefined);
+    } finally {
+      await reader.close().catch(() => undefined);
+    }
+
+    let file = findSessionFile(droidId, s.info.directory);
+    for (let i = 0; file === undefined && i < 30; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      file = findSessionFile(droidId, s.info.directory);
+    }
+    const scanned = file === undefined ? undefined : scanSessionFile(file);
+    if (scanned === undefined) throw new Error("forked session was not written to disk");
+
+    const now = Date.now();
+    this.store.set(ocIdFor(droidId), {
+      droidSessionId: droidId,
+      directory: s.info.directory,
+      title: scanned.title,
+      ...(s.model !== undefined ? { model: { providerID: s.model.providerID, modelID: s.model.modelID } } : {}),
+      created: now,
+      updated: now,
+    });
+    const child = this.adopt(scanned);
+    child.titleLocked = true;
+    this.emit(child.info.directory, { type: "session.created", properties: { info: child.info } });
+    return child.info;
+  }
+
+  /** "<title> (fork #n)", numbered after the highest fork of the same title in the directory. */
+  private forkTitle(s: ManagedSession): string {
+    const base = s.info.title.replace(/ \(fork #\d+\)$/, "");
+    let highest = 0;
+    for (const other of this.sessions.values()) {
+      if (other.info.directory !== s.info.directory) continue;
+      const m = /^(.*) \(fork #(\d+)\)$/.exec(other.info.title);
+      if (m !== null && m[1] === base) highest = Math.max(highest, Number(m[2]));
+    }
+    return `${base} (fork #${highest + 1})`;
   }
 
   private async runCompaction(s: ManagedSession, droid: DroidSession): Promise<void> {
@@ -879,6 +951,7 @@ export class SessionManager {
       directory: sc.directory,
       title: reg?.title ?? sc.title,
       version: ADAPTER_VERSION,
+      ...(reg?.metadata !== undefined ? { metadata: reg.metadata } : {}),
       time: {
         created: sc.created,
         updated: Math.max(sc.updated, reg?.updated ?? 0),
@@ -918,6 +991,7 @@ export class SessionManager {
       directory: s.info.directory,
       ...(s.titleLocked ? { title: s.info.title } : {}),
       ...(s.info.time.archived !== undefined ? { archived: s.info.time.archived } : {}),
+      ...(s.info.metadata !== undefined ? { metadata: s.info.metadata } : {}),
       ...(s.model !== undefined ? { model: { providerID: s.model.providerID, modelID: s.model.modelID } } : {}),
       created: s.info.time.created,
       updated: s.info.time.updated,

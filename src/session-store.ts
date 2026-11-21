@@ -71,6 +71,7 @@ export interface SessionRegistryEntry {
   title?: string;
   /** Archive timestamp (absent/0 = live), OpenChamber's archive toggle. */
   archived?: number;
+  metadata?: Record<string, unknown>;
   model?: { providerID: string; modelID: string };
   created: number;
   updated: number;
