@@ -13,12 +13,22 @@ if [ -z "${FACTORY_API_KEY:-}" ] && [ -f "$KEY_FILE" ]; then
   export FACTORY_API_KEY
 fi
 
+# Run the compiled build (made by `npm install` or `npm run build`) because it
+# starts faster; fall back to tsx on the sources when there is no build or a
+# source file is newer than it, so a `git pull` never runs stale code.
+run() {
+  if [ -f "$PKG_DIR/dist/cli.js" ] \
+    && [ -z "$(find "$PKG_DIR/src" -name '*.ts' -newer "$PKG_DIR/dist/cli.js" 2>/dev/null | head -n 1)" ]; then
+    exec node "$PKG_DIR/dist/cli.js" "$@"
+  fi
+  exec "$PKG_DIR/node_modules/.bin/tsx" "$PKG_DIR/src/cli.ts" "$@"
+}
+
 if [ "$1" = "serve" ]; then
-  shift
-  exec "$PKG_DIR/node_modules/.bin/tsx" "$PKG_DIR/src/cli.ts" serve "$@"
+  run "$@"
 fi
 if [ "$1" = "--version" ] || [ "$1" = "-v" ]; then
-  exec "$PKG_DIR/node_modules/.bin/tsx" "$PKG_DIR/src/cli.ts" --version
+  run "$@"
 fi
 echo "opencode-droid wrapper: unsupported command '$1' (only 'serve' is implemented)" >&2
 exit 1

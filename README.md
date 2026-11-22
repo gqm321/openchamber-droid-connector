@@ -9,19 +9,41 @@ OpenChamber 通过 `settings.opencodeBinary` 把它当作 `opencode serve` 来�
 
 ## 要求
 
-- Node 20+
-- 已安装并登录的 `droid`(`FACTORY_API_KEY` 或 `droid` 登录态)
-- OpenChamber 1.24.x(`@openchamber/web@1.24.2` 已联调)
+- Linux 或 macOS(未支持 Windows:`bin/opencode-droid` 是 POSIX shell 脚本)
+- Node 22+
+- 已安装的 `droid`,以及一个 **Factory API key**。`@factory/droid-sdk` 读不到 `droid` 命令行的登录态,所以必须提供 key,二选一:
+  - 环境变量 `FACTORY_API_KEY`
+  - 把 key 写进文件 `~/.config/openchamber-droid-connector/api-key`(路径可用 `OCDROID_KEY_FILE` 改);`bin/opencode-droid` 启动时读取它
+- OpenChamber 1.24.x(`@openchamber/web@1.24.2` 已联调;1.x 的最后一个版本)
 
 ## 使用
 
 ```bash
-npm install
+npm install        # 同时会编译出 dist/
+mkdir -p ~/.config/openchamber-droid-connector
+printf '%s' 'fk-...' > ~/.config/openchamber-droid-connector/api-key && chmod 600 ~/.config/openchamber-droid-connector/api-key
 # OpenChamber 的 settings.json:
 #   { "opencodeBinary": "/绝对路径/bin/opencode-droid" }
 # 或设置环境变量 OPENCODE_BINARY
 OPENCHAMBER_DATA_DIR=~/.config/openchamber-droid openchamber --port 3901
 ```
+
+`bin/opencode-droid` 优先运行编译好的 `dist/cli.js`(启动更快);没有 `dist/`,或 `src/` 里有比它更新的文件时,自动改用 `tsx` 跑源码,所以 `git pull` 后不重新编译也不会跑到旧代码。
+
+## 用量面板补丁(可选)
+
+OpenChamber 自带的用量面板不认识 Factory。`contrib/quota-patch/` 给 OpenChamber 1.24.2 加一个 `factory` provider,显示 Droid 的 5h / weekly / monthly 配额(数据来自 Factory 的 billing 接口,它不是公开文档化的接口,可能会变)。不打补丁适配器照常工作,只是没有这个面板。
+
+```bash
+# npm 安装的 @openchamber/web(Linux、macOS),原地打补丁,可重复执行
+contrib/quota-patch/patch-openchamber-quota.sh web "$(npm root -g)/@openchamber/web"
+
+# Linux AppImage:解包并打补丁,输出到 AppImage 旁边的 openchamber-patched/,
+# 之后运行其中的 AppRun;原 AppImage 不变,删除该目录即可回退
+contrib/quota-patch/patch-openchamber-quota.sh appimage OpenChamber-1.24.2-linux-x86_64.AppImage
+```
+
+补丁会检查它要改的上游文本,版本不符时直接报错停止。macOS 的 `.app` 包没有适配,请用 npm 方式。它读取的 API key 与上面相同。
 
 ## 环境变量
 
@@ -31,7 +53,10 @@ OPENCHAMBER_DATA_DIR=~/.config/openchamber-droid openchamber --port 3901
 | `OCDROID_AUTONOMY` | Droid 自主级别,默认 `low`(需要权限时会在 UI 里询问) |
 | `OCDROID_AGENT` | 暴露的 agent 名,默认 `build` |
 | `OCDROID_TOOL_MODE` | Droid 的工具执行模式:缺省 `direct_only`(工具逐个直接调用);设为 `script_only` 启用 Programmatic Tool Calling,见下 |
-| `OCDROID_STATE_DIR` | 适配器状态目录(归档标记、模型记忆) |
+| `OCDROID_STATE_DIR` | 适配器状态目录(归档标记、模型记忆),默认 `~/.config/openchamber-droid-connector` |
+| `OCDROID_KEY_FILE` | 存放 Factory API key 的文件,默认 `~/.config/openchamber-droid-connector/api-key` |
+| `OCDROID_DEBUG` | 设为 `1` 时把每个 HTTP 请求(方法、URL、状态码、耗时、列表条数)写入日志 |
+| `OCDROID_DEBUG_LOG` | 上述日志文件,默认系统临时目录下的 `openchamber-droid-debug.log` |
 
 ## Programmatic Tool Calling(`script_only`)
 

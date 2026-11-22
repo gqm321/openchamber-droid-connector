@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import { SessionManager } from "./sessions.js";
 import { attachmentsOf } from "./attachments.js";
 import { getAgentName, getExposedAgentNames } from "./agent-name.js";
@@ -21,7 +22,7 @@ import {
 } from "./v2.js";
 import type { OCEvent, OCModelRef, OCPromptBody, OCSession } from "./types.js";
 
-const DEBUG_LOG = process.env.OCDROID_DEBUG_LOG ?? "/tmp/openchamber-droid-debug.log";
+const DEBUG_LOG = process.env.OCDROID_DEBUG_LOG ?? join(tmpdir(), "openchamber-droid-debug.log");
 
 // This connector is not opencode — it only implements an OpenCode API subset.
 // OpenChamber reads /global/health's `version` as the installed opencode version
