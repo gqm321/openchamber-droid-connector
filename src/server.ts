@@ -170,7 +170,11 @@ export class AdapterServer {
   // ---------------------------------------------------------------
 
   private async route(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    debugLog(`[http] ${req.method} ${req.url}`);
+    if (process.env.OCDROID_DEBUG) {
+      const started = Date.now();
+      debugLog(`[http] ${new Date().toISOString()} ${req.method} ${req.url} dir=${String(req.headers["x-opencode-directory"] ?? "-")}`);
+      res.on("finish", () => debugLog(`[http]   -> ${res.statusCode} ${req.method} ${req.url} ${Date.now() - started}ms${(res as { ocCount?: number }).ocCount !== undefined ? ` items=${(res as { ocCount?: number }).ocCount}` : ""}`));
+    }
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-opencode-directory");
@@ -362,9 +366,7 @@ export class AdapterServer {
       // OpenChamber page-loads the sidebar through this route (not /session) with
       // ?directory=…&archived=…&roots=…&limit=…. Honor directory/roots/archived:
       // ignoring them left the sidebar with only live sessions, so restored
-      // history never appeared after a restart; ignoring `archived` broke the
-      // archive tab (it must show only time.archived sessions, while the normal
-      // sidebar's archived=false must exclude them).
+      // history never appeared after a restart.
       const directoryParam =
         url.searchParams.get("directory") ?? (req.headers["x-opencode-directory"] as string | undefined);
       const rootsOnly = url.searchParams.get("roots") === "true";
@@ -373,7 +375,14 @@ export class AdapterServer {
           ? this.sessions.list(directoryParam)
           : this.sessions.listAll();
       if (rootsOnly) sessions = sessions.filter((s) => s.parentID === undefined);
-      sessions = applyArchivedFilter(sessions, url.searchParams.get("archived"));
+      // OpenCode semantics for this route: archived=true *includes* archived
+      // sessions (the client narrows to the archived ones itself), and
+      // archived=false excludes them. OpenChamber's startup load is the global
+      // (no directory) archived=true request; filtering to archived-only there
+      // left every non-active project empty until a session was created in it.
+      if (url.searchParams.get("archived") === "false") {
+        sessions = sessions.filter((s) => s.time.archived === undefined);
+      }
       this.json(res, 200, sessions);
       return;
     }
@@ -827,6 +836,7 @@ export class AdapterServer {
 
   private json(res: ServerResponse, status: number, body: unknown): void {
     const payload = JSON.stringify(body);
+    if (Array.isArray(body)) (res as { ocCount?: number }).ocCount = body.length;
     res.writeHead(status, { "Content-Type": "application/json" }).end(payload);
   }
 
