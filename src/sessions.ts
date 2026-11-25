@@ -65,8 +65,46 @@ function id(prefix: string): string {
   return `${prefix}_${randomUUID().replaceAll("-", "")}`;
 }
 
+/**
+ * A turn Droid starts by itself is not part of the SDK stream, only of the raw
+ * notifications. Map those onto the stream event shapes the turn code reads.
+ */
+function notificationToEvent(n: Json): Json | undefined {
+  switch (n.type) {
+    case "assistant_text_delta":
+    case "thinking_text_delta":
+      return { ...n, text: n.textDelta };
+    case "assistant_text_complete":
+    case "thinking_text_complete":
+    case "tool_result":
+      return n;
+    case "tool_call": {
+      const use = n.toolUse as Json | undefined;
+      if (use === undefined) return undefined;
+      const input = (use.input ?? {}) as Json;
+      // Notifications repeat the call while its arguments stream in.
+      return Object.keys(input).length > 0 ? { type: "tool_call", toolUseId: use.id, name: use.name, input } : { type: "tool_call_delta", toolUse: use };
+    }
+    case "create_message": {
+      const message = n.message as Json | undefined;
+      return message?.role === "assistant" ? { type: "assistant", message } : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
 function usageToTokens(u: LastCallUsage): OCAssistantMessage["tokens"] {
   return { input: u.input, output: u.output, reasoning: 0, cache: { read: u.cacheRead, write: 0 } };
+}
+
+const DEFAULT_PROMPT_APPEND =
+  "Reply in the language the user writes in, and use it for every question and option you pass to AskUser and for any plan you submit with ExitSpecMode. " +
+  "When the user writes Chinese, write Chinese.";
+
+/** Extra system prompt for new sessions; `OCDROID_SYSTEM_APPEND` replaces it, an empty value turns it off. */
+function promptAppend(): string {
+  return (process.env.OCDROID_SYSTEM_APPEND ?? DEFAULT_PROMPT_APPEND).trim();
 }
 
 function autonomy(): AutonomyLevel {
@@ -136,6 +174,8 @@ export interface ManagedSession {
   turnAbort?: AbortController | undefined;
   /** A prompt is being set up (resume, model switch) and its turn has not started yet. */
   preparing?: boolean;
+  /** Set while a turn Droid started on its own (a sub-agent finished) is being shown. */
+  background?: { done: () => void } | undefined;
   /** A user-requested /compact is in flight; its own flow reports it. */
   manualCompaction?: boolean;
   /** Compaction Droid started on its own (context threshold), awaiting its summary. */
@@ -175,10 +215,13 @@ export class SessionManager {
   async create(directory: string, title?: string, parentID?: string): Promise<OCSession> {
     const holder: { s?: ManagedSession } = {};
     const modelId = process.env.OCDROID_MODEL?.trim();
+    const append = promptAppend();
     const droid = await createSession({
       cwd: directory,
       autonomyLevel: autonomy(),
       ...(modelId ? { modelId } : {}),
+      // Only new sessions: the SDK cannot set a system prompt when resuming one.
+      ...(append !== "" ? { systemPrompt: { type: "preset" as const, preset: "droid" as const, append } } : {}),
       permissionHandler: (p) => this.onPermission(holder.s, p),
       askUserHandler: (p) => this.onAskUser(holder.s, p),
       mcpServers: await this.pluginServers(holder, directory),
@@ -256,6 +299,7 @@ export class SessionManager {
   private watchUsage(s: ManagedSession, droid: DroidSession): void {
     droid.onNotification((n) => {
       const inner = (n.params as { notification?: Json } | undefined)?.notification;
+      if (inner !== undefined) this.onBackgroundNotification(s, inner);
       if (inner?.type === "droid_working_state_changed" || inner?.type === "session_compacted") {
         this.onCompactionNotification(s, inner);
         return;
@@ -269,6 +313,53 @@ export class SessionManager {
       turn.message.tokens = usageToTokens(usage);
       this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
     });
+  }
+
+  /**
+   * Sub-agents run in the background. When one finishes, Droid starts a turn of
+   * its own, started by a `task-completion:` message, to report on it. That turn
+   * never shows up in `stream()`, so it is followed through the notifications.
+   */
+  private onBackgroundNotification(s: ManagedSession, inner: Json): void {
+    if (s.background === undefined) {
+      const message = inner.message as Json | undefined;
+      if (inner.type !== "create_message" || typeof message?.id !== "string" || !message.id.startsWith("task-completion:")) return;
+      if (s.turn !== undefined || s.preparing === true) return;
+      this.beginBackgroundTurn(s);
+      return;
+    }
+    if (inner.type === "agent_turn_completed") {
+      this.endBackgroundTurn(s, inner.reason === "completed" ? "stop" : "error");
+      return;
+    }
+    if (inner.type === "droid_working_state_changed" && inner.newState === "idle") {
+      this.endBackgroundTurn(s, "stop");
+      return;
+    }
+    const ev = notificationToEvent(inner);
+    if (ev !== undefined) this.onDroidEvent(s, ev);
+  }
+
+  private beginBackgroundTurn(s: ManagedSession): void {
+    let parentID = "";
+    for (let i = (s.messages?.length ?? 0) - 1; i >= 0; i -= 1) {
+      if (s.messages![i]!.info.role === "user") {
+        parentID = s.messages![i]!.info.id;
+        break;
+      }
+    }
+    let done: () => void = () => undefined;
+    s.turnDone = new Promise<void>((resolve) => (done = resolve));
+    s.background = { done };
+    this.openTurn(s, parentID);
+  }
+
+  private endBackgroundTurn(s: ManagedSession, finish: string): void {
+    const background = s.background;
+    if (background === undefined) return;
+    s.background = undefined;
+    this.finishTurn(s, finish);
+    background.done();
   }
 
   /** Spawn a droid process for a dormant session and adopt it as live. */
@@ -793,7 +884,7 @@ export class SessionManager {
     };
   }
 
-  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string, media?: PreparedAttachments): Promise<void> {
+  private openTurn(s: ManagedSession, parentID: string): void {
     const assistant = this.newAssistantMessage(s, parentID);
     const record: OCMessageWithParts = { info: assistant, parts: [] };
     s.messages?.push(record);
@@ -801,6 +892,10 @@ export class SessionManager {
     s.turnAbort = new AbortController();
     this.setStatus(s, { type: "busy" });
     this.emit(s.info.directory, { type: "message.updated", properties: { info: assistant } });
+  }
+
+  private async runTurn(s: ManagedSession, droid: DroidSession, text: string, parentID: string, media?: PreparedAttachments): Promise<void> {
+    this.openTurn(s, parentID);
 
     let finish = "stop";
     try {
