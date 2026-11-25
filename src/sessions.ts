@@ -15,8 +15,8 @@ import {
 } from "@factory/droid-sdk/node";
 import { PROVIDER_ID } from "./catalog.js";
 import { prepareAttachments, type Attachment, type PreparedAttachments } from "./attachments.js";
-import { getAgentName } from "./agent-name.js";
-import { COMPACTED_FALLBACK_TEXT, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, resultText, todosOfPart } from "./droid-map.js";
+import { PLAN_AGENT, getAgentName } from "./agent-name.js";
+import { COMPACTED_FALLBACK_TEXT, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, questionsOf, resultText, todosOfPart, toolMetadata } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
@@ -39,6 +39,8 @@ import type {
   OCModelRef,
   OCPart,
   OCPermissionRequest,
+  OCQuestionInfo,
+  OCQuestionRequest,
   OCReasoningPart,
   OCSession,
   OCSessionStatus,
@@ -100,6 +102,14 @@ interface PendingPermission {
   resolve: (outcome: Outcome) => void;
 }
 
+interface PendingQuestion {
+  request: OCQuestionRequest;
+  /** undefined when the user dismissed the question. */
+  resolve: (answers: string[][] | undefined) => void;
+}
+
+type AskUserHandler = NonNullable<NonNullable<Parameters<typeof createSession>[0]>["askUserHandler"]>;
+
 export interface ManagedSession {
   info: OCSession;
   droidSessionId: string;
@@ -113,9 +123,13 @@ export interface ManagedSession {
   /** The user renamed the session; Droid's auto-title must not override it. */
   titleLocked: boolean;
   pending: Map<string, PendingPermission>;
+  /** Questions Droid is waiting on (AskUser, plan approval). */
+  questions: Map<string, PendingQuestion>;
   dormant: boolean;
   /** Settles when the in-flight turn has fully finished (events emitted). */
   turnDone: Promise<void> | undefined;
+  /** Agent the UI last used for a prompt; `plan` runs the session in Droid's spec mode. */
+  agentMode?: string;
   /** A prompt is being set up (resume, model switch) and its turn has not started yet. */
   preparing?: boolean;
   /** A user-requested /compact is in flight; its own flow reports it. */
@@ -162,6 +176,7 @@ export class SessionManager {
       autonomyLevel: autonomy(),
       ...(modelId ? { modelId } : {}),
       permissionHandler: (p) => this.onPermission(holder.s, p),
+      askUserHandler: (p) => this.onAskUser(holder.s, p),
     });
 
     const now = Date.now();
@@ -184,6 +199,7 @@ export class SessionManager {
       turn: undefined,
       titleLocked: title !== undefined && title !== "",
       pending: new Map(),
+      questions: new Map(),
       dormant: false,
       turnDone: undefined,
     };
@@ -243,6 +259,7 @@ export class SessionManager {
     const holder = { s };
     const droid = await resumeSession(s.droidSessionId, {
       permissionHandler: (p) => this.onPermission(holder.s, p),
+      askUserHandler: (p) => this.onAskUser(holder.s, p),
     });
     await this.configure(droid);
     this.watchUsage(s, droid);
@@ -422,6 +439,7 @@ export class SessionManager {
     messageID?: string,
     variant?: string,
     attachments: Attachment[] = [],
+    agent?: string,
   ): Promise<void> {
     const s = this.get(sessionId);
     if (!s) throw new Error(`unknown session: ${sessionId}`);
@@ -451,6 +469,16 @@ export class SessionManager {
         }
       }
 
+      if (agent !== undefined && agent !== "" && !wasBusy && !noReply) {
+        try {
+          await this.applyAgentMode(s, droid, agent);
+        } catch (err) {
+          reported = true;
+          this.emitError(s, err instanceof Error ? err.message : String(err));
+          throw err;
+        }
+      }
+
       // OpenChamber sends a client-generated messageID with its optimistic insert;
       // the server must reuse it so the echoed events reconcile the optimistic
       // entry in place instead of rendering the user's message twice.
@@ -459,7 +487,7 @@ export class SessionManager {
         sessionID: s.info.id,
         role: "user",
         time: { created: Date.now() },
-        agent: getAgentName(),
+        agent: s.agentMode ?? getAgentName(),
         model: s.model ?? model ?? { providerID: PROVIDER_ID, modelID: "unknown" },
       };
       const parts: OCPart[] = text !== "" ? [{ id: id("prt"), sessionID: s.info.id, messageID: userMsg.id, type: "text", text }] : [];
@@ -495,6 +523,18 @@ export class SessionManager {
       }
       throw err;
     }
+  }
+
+  /**
+   * The UI's `plan` agent is Droid's spec mode: the model researches and
+   * proposes a plan, which the user approves before anything is changed. Every
+   * other agent runs in the normal mode, so the mode follows the agent picker.
+   */
+  private async applyAgentMode(s: ManagedSession, droid: DroidSession, agent: string): Promise<void> {
+    s.agentMode = agent;
+    const inSpec = droid.settings.interactionMode === "spec";
+    if (agent === PLAN_AGENT && !inSpec) await droid.enterSpecMode();
+    else if (agent !== PLAN_AGENT && inSpec) await droid.exitSpecMode();
   }
 
   /**
@@ -726,7 +766,7 @@ export class SessionManager {
       parentID,
       modelID: s.model?.modelID ?? "unknown",
       providerID: s.model?.providerID ?? PROVIDER_ID,
-      mode: getAgentName(),
+      mode: s.agentMode ?? getAgentName(),
       path: { cwd: s.info.directory, root: s.info.directory },
       cost: 0,
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -945,7 +985,7 @@ export class SessionManager {
             input,
             output: text,
             title: part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool,
-            metadata: {},
+            metadata: toolMetadata(part.tool, text),
             time: { start, end: Date.now() },
           };
     this.emitPart(s, part);
@@ -999,6 +1039,7 @@ export class SessionManager {
     const p = params as { toolUses?: Json[]; options?: Array<{ label: string; value: string }> };
     const uses = p.toolUses ?? [];
     const first = uses[0] as { toolUse?: Json; confirmationType?: string; details?: Json } | undefined;
+    if (first?.confirmationType === "exit_spec_mode") return this.onPlanApproval(s, first, p.options ?? []);
     const request: OCPermissionRequest = {
       id: id("per"),
       sessionID: s.info.id,
@@ -1026,6 +1067,95 @@ export class SessionManager {
       this.emit(s.info.directory, { type: "permission.replied", properties: { sessionID: s.info.id, requestID: requestId, reply: "reject" } });
       p.resolve(ToolConfirmationOutcome.Cancel);
     }
+    for (const requestId of [...s.questions.keys()]) this.settleQuestion(s, requestId, undefined);
+  }
+
+  // ------------------------------------------------------------------
+  // questions: Droid's AskUser tool and plan approval
+  // ------------------------------------------------------------------
+
+  pendingQuestions(): OCQuestionRequest[] {
+    return [...this.sessions.values()].flatMap((s) => [...s.questions.values()].map((q) => q.request));
+  }
+
+  /** POST /question/{id}/reply. Returns false when the request is unknown. */
+  replyQuestion(requestId: string, answers: string[][]): boolean {
+    for (const s of this.sessions.values()) if (s.questions.has(requestId)) return this.settleQuestion(s, requestId, answers);
+    return false;
+  }
+
+  /** POST /question/{id}/reject. */
+  rejectQuestion(requestId: string): boolean {
+    for (const s of this.sessions.values()) if (s.questions.has(requestId)) return this.settleQuestion(s, requestId, undefined);
+    return false;
+  }
+
+  private settleQuestion(s: ManagedSession, requestId: string, answers: string[][] | undefined): boolean {
+    const q = s.questions.get(requestId);
+    if (q === undefined) return false;
+    s.questions.delete(requestId);
+    this.emit(
+      s.info.directory,
+      answers === undefined
+        ? { type: "question.rejected", properties: { sessionID: s.info.id, requestID: requestId } }
+        : { type: "question.replied", properties: { sessionID: s.info.id, requestID: requestId, answers } },
+    );
+    q.resolve(answers);
+    return true;
+  }
+
+  private ask(s: ManagedSession, questions: OCQuestionInfo[], toolUseId: string | undefined): Promise<string[][] | undefined> {
+    const request: OCQuestionRequest = {
+      id: id("que"),
+      sessionID: s.info.id,
+      questions,
+      ...(toolUseId !== undefined ? { tool: { messageID: s.turn?.message.id ?? "", callID: this.openChamberCallId(s, toolUseId) } } : {}),
+    };
+    return new Promise((resolve) => {
+      s.questions.set(request.id, { request, resolve });
+      this.emit(s.info.directory, { type: "question.asked", properties: request });
+    });
+  }
+
+  private onAskUser(s: ManagedSession | undefined, params: Parameters<AskUserHandler>[0]): ReturnType<AskUserHandler> {
+    if (s === undefined) return Promise.resolve({ cancelled: true, answers: [] });
+    const asked = params as unknown as Json;
+    const questions = questionsOf(asked);
+    const toolUseId = typeof asked.toolCallId === "string" ? asked.toolCallId : undefined;
+    return this.ask(s, questions, toolUseId).then((answers) => {
+      if (answers === undefined) return { cancelled: true, answers: [] };
+      return {
+        answers: questions.map((q, index) => ({ index, question: q.question, answer: (answers[index] ?? []).join(", ") })),
+      };
+    });
+  }
+
+  /**
+   * Leaving plan (spec) mode needs the user's approval, which Droid asks as a
+   * permission with the plan attached. It is shown as a question whose options
+   * are the ways to proceed; the plan itself is the question text.
+   */
+  private async onPlanApproval(
+    s: ManagedSession,
+    use: { toolUse?: Json; details?: Json },
+    offered: Array<{ label: string; value: string }>,
+  ): Promise<Outcome> {
+    // Starting a fresh session from the plan has no counterpart in the UI.
+    const choices = offered.filter((o) => !o.value.startsWith("proceed_new_session"));
+    if (choices.length === 0) return ToolConfirmationOutcome.Cancel;
+    const title = typeof use.details?.title === "string" ? use.details.title : "";
+    const plan = typeof use.details?.plan === "string" ? use.details.plan : "";
+    const question: OCQuestionInfo = {
+      question: [title, plan].filter((t) => t !== "").join("\n\n") || "Approve this plan?",
+      header: "Plan approval",
+      options: choices.map((o) => ({ label: o.label, description: "" })),
+      multiple: false,
+      custom: false,
+    };
+    const answers = await this.ask(s, [question], typeof use.toolUse?.id === "string" ? use.toolUse.id : undefined);
+    const picked = answers?.[0]?.[0];
+    const choice = choices.find((o) => o.label === picked);
+    return choice === undefined ? ToolConfirmationOutcome.Cancel : (choice.value as Outcome);
   }
 
   // ------------------------------------------------------------------
@@ -1098,6 +1228,7 @@ export class SessionManager {
       turn: undefined,
       titleLocked: reg?.title !== undefined,
       pending: new Map(),
+      questions: new Map(),
       dormant: true,
       turnDone: undefined,
     };

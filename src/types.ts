@@ -178,6 +178,9 @@ export type OCEvent =
   | { type: "message.part.updated"; properties: { part: OCPart; delta?: string } }
   | { type: "permission.asked"; properties: OCPermissionRequest }
   | { type: "permission.replied"; properties: { sessionID: string; requestID: string; reply: "once" | "always" | "reject" } }
+  | { type: "question.asked"; properties: OCQuestionRequest }
+  | { type: "question.replied"; properties: { sessionID: string; requestID: string; answers: string[][] } }
+  | { type: "question.rejected"; properties: { sessionID: string; requestID: string } }
   /**
    * The model Droid is actually running changed — either the UI asked for it or Droid
    * changed it on its own side. v2.ts maps this to `session.model.selected`,
@@ -197,6 +200,25 @@ export interface OCPermissionRequest {
   tool?: { messageID: string; callID: string };
 }
 
+/** One question of a `question.asked` request (OpenCode's QuestionInfo). */
+export interface OCQuestionInfo {
+  question: string;
+  /** Very short label, at most 30 characters. */
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiple?: boolean;
+  /** Whether the user may type an answer of their own. */
+  custom?: boolean;
+}
+
+/** Mirrors the SDK's QuestionRequest (question.asked payload). */
+export interface OCQuestionRequest {
+  id: string;
+  sessionID: string;
+  questions: OCQuestionInfo[];
+  tool?: { messageID: string; callID: string };
+}
+
 export interface OCProject {
   id: string;
   worktree: string;
@@ -210,6 +232,7 @@ export interface OCPromptBody {
   model?: OCModelRef;
   /** Model variant, i.e. the Droid reasoning effort. */
   variant?: string;
+  /** OpenCode agent the UI selected; `plan` puts Droid into spec mode. */
   agent?: string;
   noReply?: boolean;
   system?: string;

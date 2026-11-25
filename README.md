@@ -88,6 +88,8 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 - 会话创建/列表/改名/归档/删除;会话来自 `~/.factory/sessions`,重启后历史与工具部件可恢复,并能续聊
 - 流式文本、思考内容、工具调用(Execute→bash、Read、Create→write、Edit、Grep、Glob 等)
 - 权限询问:`permission.asked` → `POST /permission/{id}/reply`(once / always / reject)
+- Droid 的 `AskUser` 显示为 OpenChamber 的提问卡片(单选/多选/自定义输入),回答后交还给 Droid;关闭提问相当于取消
+- 计划模式:智能体列表里的 `plan` 对应 Droid 的 spec 模式。Droid 提交计划后,以“Plan approval”提问卡片显示计划和可选的执行方式(逐项确认 / 自动执行低、中、高风险操作 / 继续修改计划);选回 `build` 即回到普通模式
 - 模型切换(含推理强度)、中止(interrupt);模型列表带上下文长度、推理强度、模态信息
 - 上下文用量:取 Droid 最近一次模型调用的 token 数
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
@@ -98,7 +100,7 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 ## 已知缺口
 
 - revert、share、文件 diff 为桩实现(diff 返回 501)
-- Droid 的 AskUser 未映射到 question 事件
+- 计划批准里“在新会话中执行”的选项未提供
 - `script_only` 下看不到脚本源码与 `console.log` 输出(需要给 OpenChamber 前端打补丁)
 - 附件只处理 v1 接口(OpenChamber 1.24.x);v2 `/prompt` 接口未处理附件
 - 只在 OpenChamber 1.24.x 验证,未测 2.x
@@ -109,6 +111,7 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 npm run smoke              # 33 项
 npm run v2-smoke           # 44 项
 npm run permission-smoke   # 14 项
+npm run question-smoke     # 19 项:AskUser 与计划模式
 npm run typecheck
 ```
 

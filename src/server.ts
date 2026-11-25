@@ -10,7 +10,7 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "./sessions.js";
 import { attachmentsOf } from "./attachments.js";
-import { getAgentName, getExposedAgentNames } from "./agent-name.js";
+import { agentDescription, getAgentName, getExposedAgentNames } from "./agent-name.js";
 import { loadCatalog, type Catalog } from "./catalog.js";
 import {
   defaultV2Model,
@@ -132,6 +132,7 @@ export class AdapterServer {
     const v1Frame = `data: ${JSON.stringify(event)}\n\n`;
     const v2Frames = this.v2events.translate(_directory, event).map((frame) => `data: ${JSON.stringify(frame)}\n\n`);
     for (const [res, flavor] of this.sseClients) {
+      if (res.writableEnded) continue;
       if (flavor === "v2") {
         for (const frame of v2Frames) res.write(frame);
       } else {
@@ -283,7 +284,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts)).catch(() => undefined);
+          void this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts), body.agent).catch(() => undefined);
           res.writeHead(204).end();
           return;
         }
@@ -293,7 +294,7 @@ export class AdapterServer {
             .filter((p) => p.type === "text" && typeof p.text === "string")
             .map((p) => p.text!)
             .join("\n");
-          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts));
+          await this.sessions.prompt(sessionId!, text, body.model, body.noReply, body.messageID, body.variant, attachmentsOf(body.parts), body.agent);
           await this.sessions.waitForTurn(sessionId!);
           const msgs = this.sessions.messages(sessionId!) ?? [];
           this.json(res, 200, [...msgs].reverse().find((m) => m.info.role === "assistant") ?? null);
@@ -388,7 +389,21 @@ export class AdapterServer {
       return;
     }
     if (path === "/question" && method === "GET") {
-      this.json(res, 200, []);
+      this.json(res, 200, this.sessions.pendingQuestions());
+      return;
+    }
+    const questionAnswer = path.match(/^\/question\/([^/]+)\/(reply|reject)$/);
+    if (questionAnswer && method === "POST") {
+      const requestId = decodeURIComponent(questionAnswer[1]!);
+      if (questionAnswer[2] === "reject") {
+        this.json(res, 200, this.sessions.rejectQuestion(requestId));
+        return;
+      }
+      const body = (await this.body(req)) as { answers?: unknown } | undefined;
+      const answers = Array.isArray(body?.answers)
+        ? (body.answers as unknown[]).map((a) => (Array.isArray(a) ? a.map((x) => String(x)) : []))
+        : [];
+      this.json(res, 200, this.sessions.replyQuestion(requestId, answers));
       return;
     }
     if (path === "/permission" && method === "GET") {
@@ -434,13 +449,9 @@ export class AdapterServer {
       // agent next to Droid so the picker — and its default resolution,
       // which looks for `build` — has a real option. Both names run the same
       // Droid agent (see getExposedAgentNames).
-      const piName = getAgentName();
       this.json(res, 200, getExposedAgentNames().map((name) => ({
         name,
-        description:
-          name === piName
-            ? `${piName} (Droid via openchamber-droid-connector)`
-            : `${name} — ${piName} (Droid via openchamber-droid-connector)`,
+        description: agentDescription(name),
         mode: "primary",
         hidden: false,
         options: {},
@@ -456,14 +467,10 @@ export class AdapterServer {
   // ---------------------------------------------------------------
 
   private v2Agents(): Array<{ id: string; name: string; description: string; mode: string; hidden: boolean; options: Record<string, unknown> }> {
-    const piName = getAgentName();
     return getExposedAgentNames().map((name) => ({
       id: name,
       name,
-      description:
-        name === piName
-          ? `${piName} (Droid via openchamber-droid-connector)`
-          : `${name} — ${piName} (Droid via openchamber-droid-connector)`,
+      description: agentDescription(name),
       mode: "primary",
       hidden: false,
       options: {},
@@ -734,11 +741,12 @@ export class AdapterServer {
             text?: string;
             model?: { providerID?: string; id?: string; modelID?: string; variant?: string };
             delivery?: string;
+            agent?: string;
           };
           const text = typeof body.text === "string" ? body.text : "";
           const messageID = typeof body.id === "string" && body.id !== "" ? body.id : `msg_${randomUUID().replaceAll("-", "")}`;
           const model = modelRefFromBody(body.model);
-          void this.sessions.prompt(sessionId, text, model, false, messageID, variantFromBody(body.model)).catch((err) => {
+          void this.sessions.prompt(sessionId, text, model, false, messageID, variantFromBody(body.model), [], typeof body.agent === "string" ? body.agent : undefined).catch((err) => {
             console.error(`[prompt] session ${sessionId} failed:`, err);
           });
           const delivery = typeof body.delivery === "string" ? body.delivery : "steer";

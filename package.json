@@ -15,7 +15,8 @@
     "smoke": "tsx contrib/smoke.ts",
     "v2-smoke": "tsx contrib/v2-smoke.ts",
     "droid-probe": "tsx contrib/droid-probe.ts",
-    "permission-smoke": "tsx contrib/permission-smoke.ts"
+    "permission-smoke": "tsx contrib/permission-smoke.ts",
+    "question-smoke": "tsx contrib/question-smoke.ts"
   },
   "engines": {
     "node": ">=22"

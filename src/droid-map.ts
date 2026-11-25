@@ -4,7 +4,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCTodo, OCToolPart, OCUserMessage } from "./types.js";
+import type { OCAssistantMessage, OCMessageWithParts, OCModelRef, OCPart, OCQuestionInfo, OCTodo, OCToolPart, OCUserMessage } from "./types.js";
 import { dataUrl, parseAttachmentNote, readStoredFile } from "./attachments.js";
 
 type Json = Record<string, unknown>;
@@ -55,6 +55,44 @@ export function todosOfPart(part: OCToolPart): OCTodo[] | undefined {
   if (part.tool !== "todowrite") return undefined;
   const todos = part.state.input.todos;
   return Array.isArray(todos) ? (todos as OCTodo[]) : undefined;
+}
+
+/**
+ * Droid's AskUser questions (the tool input, or the handler's simplified copy)
+ * in OpenCode's QuestionInfo shape. The two Droid shapes differ in the label
+ * of the header (`header`/`topic`) and in how options carry descriptions.
+ */
+export function questionsOf(input: Json): OCQuestionInfo[] {
+  const raw = Array.isArray(input.questions) ? (input.questions as unknown[]) : [];
+  const questions: OCQuestionInfo[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const q = item as Json;
+    const options = Array.isArray(q.options) ? (q.options as unknown[]) : [];
+    const descriptions = Array.isArray(q.optionDescriptions) ? (q.optionDescriptions as unknown[]) : [];
+    questions.push({
+      question: str(q.question) ?? "",
+      header: shorten(str(q.header) ?? str(q.topic) ?? "", 30),
+      options: options.map((o, i) =>
+        typeof o === "object" && o !== null
+          ? { label: str((o as Json).label) ?? "", description: str((o as Json).description) ?? "" }
+          : { label: String(o), description: str(descriptions[i]) ?? "" },
+      ),
+      multiple: q.multiSelect === true,
+      custom: true,
+    });
+  }
+  return questions;
+}
+
+/** Answers out of AskUser's result text ("[answer] a, b" per question), for the card's metadata. */
+function answersOf(text: string): string[][] {
+  return [...text.matchAll(/^\[answer\][ \t]*(.*)$/gm)].map((m) => (m[1] ?? "").split(", ").filter((a) => a !== ""));
+}
+
+/** Extra `metadata` a completed tool part carries so OpenChamber's renderers have what they expect. */
+export function toolMetadata(tool: string, output: string): Json {
+  return tool === "question" ? { answers: answersOf(output) } : {};
 }
 
 export interface MappedTool {
@@ -112,6 +150,12 @@ export function mapTool(name: string, input: Json): MappedTool {
       const done = todos.filter((t) => t.status === "completed").length;
       return { tool: "todowrite", input: { ...input, todos }, title: `${done}/${todos.length} done` };
     }
+    case "AskUser": {
+      const questions = questionsOf(input);
+      return { tool: "question", input: { ...input, questions }, title: `Asked ${questions.length} question${questions.length === 1 ? "" : "s"}` };
+    }
+    case "ExitSpecMode":
+      return { tool: "plan_exit", input: { ...input }, title: str(input.title) ?? "plan" };
     case "Script":
       return { tool: "script", input: { ...input }, title: "script" };
     default:
@@ -364,7 +408,7 @@ export function parseDroidSessionFile(
         part.state =
           b.is_error === true
             ? { status: "error", input: part.state.input, error: text !== "" ? text : `tool ${part.tool} failed`, time: { start, end: when } }
-            : { status: "completed", input: part.state.input, output: text, title: part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool, metadata: {}, time: { start, end: when } };
+            : { status: "completed", input: part.state.input, output: text, title: part.state.status === "running" ? (part.state.title ?? part.tool) : part.tool, metadata: toolMetadata(part.tool, text), time: { start, end: when } };
       }
       if (blocks.some((b) => b.type === "tool_result")) continue;
       // injected context and Droid's own notices (e.g. "history has been compacted"), not something the user typed
