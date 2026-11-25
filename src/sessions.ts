@@ -11,8 +11,10 @@ import {
   ToolConfirmationOutcome,
   createSession,
   resumeSession,
+  type DroidMcpServerConfig,
   type DroidSession,
 } from "@factory/droid-sdk/node";
+import { buildPluginServer, loadPluginTools } from "./plugins.js";
 import { PROVIDER_ID } from "./catalog.js";
 import { prepareAttachments, type Attachment, type PreparedAttachments } from "./attachments.js";
 import { PLAN_AGENT, getAgentName } from "./agent-name.js";
@@ -130,6 +132,8 @@ export interface ManagedSession {
   turnDone: Promise<void> | undefined;
   /** Agent the UI last used for a prompt; `plan` runs the session in Droid's spec mode. */
   agentMode?: string;
+  /** Aborted when the running turn is stopped; plugin tool calls watch it. */
+  turnAbort?: AbortController | undefined;
   /** A prompt is being set up (resume, model switch) and its turn has not started yet. */
   preparing?: boolean;
   /** A user-requested /compact is in flight; its own flow reports it. */
@@ -177,6 +181,7 @@ export class SessionManager {
       ...(modelId ? { modelId } : {}),
       permissionHandler: (p) => this.onPermission(holder.s, p),
       askUserHandler: (p) => this.onAskUser(holder.s, p),
+      mcpServers: await this.pluginServers(holder, directory),
     });
 
     const now = Date.now();
@@ -214,6 +219,19 @@ export class SessionManager {
     this.applyModel(managed, droid.settings.modelId);
     this.persistMeta(managed);
     return info;
+  }
+
+  /** OpenChamber's own tools (and any other OpenCode plugin tools), served to this session's Droid. */
+  private async pluginServers(holder: { s?: ManagedSession | undefined }, directory: string): Promise<DroidMcpServerConfig[]> {
+    const plugins = await loadPluginTools(this.defaultDirectory ?? directory);
+    const server = buildPluginServer(plugins, {
+      sessionID: () => holder.s?.info.id ?? "",
+      directory,
+      messageID: () => holder.s?.turn?.message.id ?? "",
+      agent: () => holder.s?.agentMode ?? getAgentName(),
+      signal: () => holder.s?.turnAbort?.signal ?? new AbortController().signal,
+    });
+    return server === undefined ? [] : [server];
   }
 
   /**
@@ -260,6 +278,7 @@ export class SessionManager {
     const droid = await resumeSession(s.droidSessionId, {
       permissionHandler: (p) => this.onPermission(holder.s, p),
       askUserHandler: (p) => this.onAskUser(holder.s, p),
+      mcpServers: await this.pluginServers(holder, s.info.directory),
     });
     await this.configure(droid);
     this.watchUsage(s, droid);
@@ -361,6 +380,7 @@ export class SessionManager {
     if (!s) return false;
     if (s.droid === undefined) return true; // dormant sessions are idle by definition
     this.cancelPending(s);
+    s.turnAbort?.abort();
     await s.droid.interrupt().catch(() => undefined);
     return true;
   }
@@ -778,6 +798,7 @@ export class SessionManager {
     const record: OCMessageWithParts = { info: assistant, parts: [] };
     s.messages?.push(record);
     s.turn = { message: assistant, record, blocks: new Map(), tools: new Map(), scripts: new Map() };
+    s.turnAbort = new AbortController();
     this.setStatus(s, { type: "busy" });
     this.emit(s.info.directory, { type: "message.updated", properties: { info: assistant } });
 
@@ -812,6 +833,7 @@ export class SessionManager {
       this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
       s.turn = undefined;
     }
+    s.turnAbort = undefined;
     this.cancelPending(s);
     s.info.time.updated = Date.now();
     this.persistMeta(s);
@@ -1043,7 +1065,7 @@ export class SessionManager {
     const request: OCPermissionRequest = {
       id: id("per"),
       sessionID: s.info.id,
-      permission: permissionName(first?.confirmationType),
+      permission: allMcpCalls(first?.details) ? "mcp" : permissionName(first?.confirmationType),
       patterns: uses.map((u) => patternOf(u as { toolUse?: Json; details?: Json })),
       metadata: { confirmationType: first?.confirmationType, details: first?.details, tools: uses.map((u) => (u as { toolUse?: Json }).toolUse?.name) },
       always: [],
@@ -1297,6 +1319,13 @@ function permissionName(confirmationType: string | undefined): string {
     default:
       return confirmationType ?? "tool";
   }
+}
+
+/** A `Script` whose nested calls are all MCP tool calls is an MCP permission to the user. */
+function allMcpCalls(details: Json | undefined): boolean {
+  const calls = details?.calls;
+  if (!Array.isArray(calls) || calls.length === 0) return false;
+  return (calls as Json[]).every((c) => (c.confirmation as Json | undefined)?.type === "mcp_tool");
 }
 
 /** What the permission is about: the command, the file, or the tool name. */

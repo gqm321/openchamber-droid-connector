@@ -57,6 +57,7 @@ contrib/quota-patch/patch-openchamber-quota.sh appimage OpenChamber-1.24.2-linux
 | `OCDROID_KEY_FILE` | 存放 Factory API key 的文件,默认 `~/.config/openchamber-droid-connector/api-key` |
 | `OCDROID_DEBUG` | 设为 `1` 时把每个 HTTP 请求(方法、URL、状态码、耗时、列表条数)写入日志 |
 | `OCDROID_DEBUG_LOG` | 上述日志文件,默认系统临时目录下的 `openchamber-droid-debug.log` |
+| `OCDROID_PLUGINS` | 设为 `0` 则不加载 `OPENCODE_CONFIG_CONTENT` 里的插件工具 |
 
 ## Programmatic Tool Calling(`script_only`)
 
@@ -90,6 +91,7 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 - 权限询问:`permission.asked` → `POST /permission/{id}/reply`(once / always / reject)
 - Droid 的 `AskUser` 显示为 OpenChamber 的提问卡片(单选/多选/自定义输入),回答后交还给 Droid;关闭提问相当于取消
 - 计划模式:智能体列表里的 `plan` 对应 Droid 的 spec 模式。Droid 提交计划后,以“Plan approval”提问卡片显示计划和可选的执行方式(逐项确认 / 自动执行低、中、高风险操作 / 继续修改计划);选回 `build` 即回到普通模式
+- OpenChamber 自带的工具(`openchamber`:项目/会话/定时任务;`openchamber_web`:内置浏览器面板)。适配器读取 `OPENCODE_CONFIG_CONTENT` 里的本地插件文件,把插件的工具作为 MCP 工具提供给 Droid,调用时带上会话目录。Droid 对这类工具默认会先询问权限(显示为 `mcp`),可选“总是允许”。只支持本地插件文件(`file://` 或绝对路径),不支持 npm 包名;`OCDROID_PLUGINS=0` 可关闭
 - 模型切换(含推理强度)、中止(interrupt);模型列表带上下文长度、推理强度、模态信息
 - 上下文用量:取 Droid 最近一次模型调用的 token 数
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
@@ -112,6 +114,7 @@ npm run smoke              # 33 项
 npm run v2-smoke           # 44 项
 npm run permission-smoke   # 14 项
 npm run question-smoke     # 19 项:AskUser 与计划模式
+npm run plugin-smoke       # 8 项:OpenChamber 风格的插件工具
 npm run typecheck
 ```
 

@@ -95,6 +95,9 @@ export function toolMetadata(tool: string, output: string): Json {
   return tool === "question" ? { answers: answersOf(output) } : {};
 }
 
+/** Droid names an MCP server's tool `<server>___<tool>`; plugin tools are served by the `openchamber` server. */
+export const PLUGIN_TOOL_PREFIX = "openchamber___";
+
 export interface MappedTool {
   tool: string;
   input: Json;
@@ -158,8 +161,13 @@ export function mapTool(name: string, input: Json): MappedTool {
       return { tool: "plan_exit", input: { ...input }, title: str(input.title) ?? "plan" };
     case "Script":
       return { tool: "script", input: { ...input }, title: "script" };
-    default:
+    default: {
+      if (name.startsWith(PLUGIN_TOOL_PREFIX) && name.length > PLUGIN_TOOL_PREFIX.length) {
+        const plugin = name.slice(PLUGIN_TOOL_PREFIX.length);
+        return { tool: plugin, input: { ...input }, title: str(input.action) ?? plugin };
+      }
       return { tool: name.toLowerCase(), input: { ...input }, title: name };
+    }
   }
 }
 
