@@ -119,6 +119,7 @@ Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或
 - 计划模式:智能体列表里的 `plan` 对应 Droid 的 spec 模式。Droid 提交计划后,以“Plan approval”提问卡片显示计划和可选的执行方式(逐项确认 / 自动执行低、中、高风险操作 / 继续修改计划);选回 `build` 即回到普通模式
 - OpenChamber 自带的工具(`openchamber`:项目/会话/定时任务;`openchamber_web`:内置浏览器面板)。适配器读取 `OPENCODE_CONFIG_CONTENT` 里的本地插件文件,把插件的工具作为 MCP 工具提供给 Droid,调用时带上会话目录。Droid 对这类工具默认会先询问权限(显示为 `mcp`),可选“总是允许”。只支持本地插件文件(`file://` 或绝对路径),不支持 npm 包名;`OCDROID_PLUGINS=0` 可关闭
 - 子智能体、后台命令、后台脚本结束后 Droid 自动发起的汇报回合会实时显示(见上节)
+- 工作中途发消息(插入):智能体忙碌时发送的消息会排进 Droid 的队列,在它下一次调用模型之前并入当前回合,不用等回合结束;界面里先显示用户消息,被采纳后新开一条助手消息来回复。这用的是 Droid SDK 会话的内部客户端(非公开 API),调用失败时退回为“等当前回合结束(最多 15 秒)再发”。点了停止之后、压缩进行中发的消息不会插入。停止时还在队列里的消息会被 Droid 丢弃,需要重发
 - 模型切换(含推理强度)、中止(interrupt);模型列表带上下文长度、推理强度、模态信息
 - 上下文用量:取 Droid 最近一次模型调用的 token 数
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
@@ -145,6 +146,7 @@ npm run question-smoke     # 19 项:AskUser 与计划模式
 npm run plugin-smoke       # 8 项:OpenChamber 风格的插件工具
 npm run subagent-smoke     # 13 项:子智能体、后台命令、后台脚本的汇报回合、自定义 droid 的模型、AskUser 语言
 npm run fork-smoke         # 17 项:从任意消息分叉
+npm run steer-smoke        # 17 项:工作中途发消息
 npm run typecheck
 ```
 

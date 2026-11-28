@@ -206,6 +206,8 @@ export interface ManagedSession {
   autoCompaction?: { record: OCAssistantMessage; card: OCToolPart } | undefined;
   /** Droid summary ids already shown, so a late notification does not add a second card. */
   compactedIds?: Set<string>;
+  /** Messages sent while a turn ran, queued inside Droid until it picks them up. */
+  steered?: Array<{ text: string; id: string }> | undefined;
 }
 
 type EventSink = (directory: string, event: OCEvent) => void;
@@ -347,6 +349,7 @@ export class SessionManager {
    */
   private onBackgroundNotification(s: ManagedSession, inner: Json): void {
     traceNotification(s, inner);
+    if (inner.type === "create_message") this.onSteerPickedUp(s, inner.message as Json | undefined);
     if (s.background === undefined) {
       if (!this.startsBackgroundTurn(s, inner)) return;
       this.beginBackgroundTurn(s);
@@ -359,6 +362,59 @@ export class SessionManager {
     }
     const ev = notificationToEvent(inner);
     if (ev !== undefined) this.onDroidEvent(s, ev);
+  }
+
+  /**
+   * A message sent while Droid works is queued and picked up before its next
+   * model call, so what follows answers it. Close the assistant message that was
+   * running and open a new one under the user's message, as OpenCode does.
+   */
+  private onSteerPickedUp(s: ManagedSession, message: Json | undefined): void {
+    if (message?.role !== "user" || s.steered === undefined || !Array.isArray(message.content)) return;
+    const text = (message.content as Json[])
+      .filter((b) => b.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("");
+    const at = s.steered.findIndex((entry) => entry.text.trim() === text.trim());
+    if (at < 0) return;
+    const [entry] = s.steered.splice(at, 1);
+    const turn = s.turn;
+    if (turn === undefined || entry === undefined) return;
+    this.finalizeDanglingTools(s, turn);
+    turn.message.time.completed = Date.now();
+    turn.message.finish = "stop";
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: turn.message } });
+    const assistant = this.newAssistantMessage(s, entry.id);
+    const record: OCMessageWithParts = { info: assistant, parts: [] };
+    s.messages?.push(record);
+    s.turn = { message: assistant, record, blocks: new Map(), tools: new Map(), scripts: new Map() };
+    this.emit(s.info.directory, { type: "message.updated", properties: { info: assistant } });
+  }
+
+  /**
+   * Hand a message to a running turn. `stream()` allows one call per session, so
+   * this goes through the session's own client, which is not public API; any
+   * failure falls back to waiting for the turn to end.
+   */
+  private async steer(s: ManagedSession, droid: DroidSession, text: string, userID: string, media: PreparedAttachments): Promise<boolean> {
+    if (s.turn === undefined || s.preparing === true || s.manualCompaction === true || s.autoCompaction !== undefined) return false;
+    if (s.turnAbort?.signal.aborted === true) return false;
+    const client = (droid as unknown as { _client?: { addUserMessage?: (params: Json) => Promise<unknown> } })._client;
+    if (typeof client?.addUserMessage !== "function") return false;
+    const hasMedia = media.images.length > 0 || media.files.length > 0;
+    const body = text.trim() === "" && hasMedia ? "See the attached file." : text;
+    try {
+      await client.addUserMessage({
+        text: body,
+        userMessageSource: "sdk",
+        ...(media.images.length > 0 ? { images: media.images } : {}),
+        ...(media.files.length > 0 ? { files: media.files } : {}),
+      });
+    } catch {
+      return false;
+    }
+    (s.steered ??= []).push({ text: body, id: userID });
+    return true;
   }
 
   /**
@@ -517,6 +573,7 @@ export class SessionManager {
     if (!s) return false;
     if (s.droid === undefined) return true; // dormant sessions are idle by definition
     this.cancelPending(s);
+    s.steered = undefined;
     s.turnAbort?.abort();
     await s.droid.interrupt().catch(() => undefined);
     return true;
@@ -666,10 +723,12 @@ export class SessionManager {
       // failing a prompt the user sent right after pressing stop.
       // A compaction in flight also leaves the session busy without a turn.
       if (wasBusy) {
+        if (await this.steer(s, droid, text + media.note, userMsg.id, media)) return;
         await Promise.race([s.turnDone, new Promise<void>((resolve) => setTimeout(resolve, 15_000))]);
         if (s.turn !== undefined || s.status.type !== "idle" || s.preparing === true) throw new Error("session is busy");
       }
       s.preparing = false;
+      s.steered = undefined;
       s.turnDone = this.runTurn(s, droid, text + media.note, userMsg.id, media);
     } catch (err) {
       if (owner) {
