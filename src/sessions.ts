@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { appendFileSync } from "node:fs";
 import {
   AutonomyLevel,
   ToolConfirmationOutcome,
@@ -98,6 +99,22 @@ function notificationToEvent(n: Json): Json | undefined {
     }
     default:
       return undefined;
+  }
+}
+
+/** `OCDROID_DEBUG_NOTIFICATIONS=<file>` logs every raw Droid notification with the adapter's turn state. */
+function traceNotification(s: ManagedSession, inner: Json): void {
+  const file = process.env.OCDROID_DEBUG_NOTIFICATIONS;
+  if (file === undefined || file === "" || inner.type === "session_token_usage_changed") return;
+  const message = inner.message as Json | undefined;
+  const id = message?.id ?? inner.turnId ?? (inner.toolUse as Json | undefined)?.id ?? inner.toolUseId ?? inner.newState;
+  try {
+    appendFileSync(
+      file,
+      `${new Date().toISOString()} ${s.info.id} ${String(inner.type)} ${typeof id === "string" ? id : ""} ${typeof message?.role === "string" ? message.role : ""} turn=${s.turn !== undefined} bg=${s.background !== undefined}\n`,
+    );
+  } catch {
+    /* tracing is best effort */
   }
 }
 
@@ -329,23 +346,44 @@ export class SessionManager {
    * `stream()`, so it is followed through the notifications.
    */
   private onBackgroundNotification(s: ManagedSession, inner: Json): void {
+    traceNotification(s, inner);
     if (s.background === undefined) {
-      const message = inner.message as Json | undefined;
-      if (inner.type !== "create_message" || typeof message?.id !== "string" || !BACKGROUND_COMPLETION.test(message.id)) return;
-      if (s.turn !== undefined || s.preparing === true) return;
+      if (!this.startsBackgroundTurn(s, inner)) return;
       this.beginBackgroundTurn(s);
-      return;
-    }
-    if (inner.type === "agent_turn_completed") {
+    } else if (inner.type === "agent_turn_completed") {
       this.endBackgroundTurn(s, inner.reason === "error" ? "error" : "stop");
       return;
-    }
-    if (inner.type === "droid_working_state_changed" && inner.newState === "idle") {
+    } else if (inner.type === "droid_working_state_changed" && inner.newState === "idle") {
       this.endBackgroundTurn(s, "stop");
       return;
     }
     const ev = notificationToEvent(inner);
     if (ev !== undefined) this.onDroidEvent(s, ev);
+  }
+
+  /**
+   * A turn nobody asked for starts with the completion message, or, when that was
+   * swallowed because a turn was still being closed, with the first thing Droid
+   * says or runs in it. Calls nested in a background script also arrive while
+   * the session is idle; they are not a turn and must not make it busy.
+   */
+  private startsBackgroundTurn(s: ManagedSession, inner: Json): boolean {
+    if (s.turn !== undefined || s.preparing === true || s.manualCompaction === true || s.autoCompaction !== undefined) return false;
+    const message = inner.message as Json | undefined;
+    switch (inner.type) {
+      case "create_message":
+        if (typeof message?.id !== "string") return false;
+        return BACKGROUND_COMPLETION.test(message.id) || (message.role === "assistant" && !message.id.startsWith("repl-"));
+      case "assistant_text_delta":
+      case "thinking_text_delta":
+        return true;
+      case "tool_call": {
+        const id = (inner.toolUse as Json | undefined)?.id;
+        return typeof id === "string" && id.startsWith("call_");
+      }
+      default:
+        return false;
+    }
   }
 
   private beginBackgroundTurn(s: ManagedSession): void {

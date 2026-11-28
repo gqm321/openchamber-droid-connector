@@ -101,6 +101,25 @@ async function main(): Promise<void> {
   ok("the command's completion started a report turn", reported.length >= 2, `${reported.length} assistant messages`);
   ok("the report mentions the output", /BGMARK/.test(reported.map(textOf).join(" ")), reported.map(textOf).join(" ").slice(0, 200));
 
+  console.log("— background script report turn —");
+  process.env.OCDROID_TOOL_MODE = "script_only";
+  const sid2 = (await api<OCSession>(url, "/session", { method: "POST", body: "{}" })).body.id;
+  const idleBefore = idleCount();
+  await api(url, `/session/${sid2}/prompt_async`, {
+    method: "POST",
+    body: prompt('请使用 Script 工具运行一个后台脚本：脚本源码的第一行必须是 // @script: {"startInBackground": true}，脚本里依次：await tools.Execute({summary:"sleep a bit",command:"sleep 12; echo STEPONE",riskLevel:"low"}) 并 text() 输出结果；再 await tools.Execute({summary:"echo",command:"echo STEPTWO",riskLevel:"low"}) 并 text() 输出。启动后不要等待，直接结束这一轮；脚本结束的通知到了之后，在回复里写出两个输出词。'),
+  });
+  await sse.waitFor(() => idleCount() > idleBefore, 120_000, "idle after starting the script");
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  const during = (await api<Record<string, { type: string }>>(url, "/session/status")).body[sid2];
+  ok("the session is idle while the script runs", during === undefined || during.type === "idle", JSON.stringify(during));
+  await sse.waitFor(() => idleCount() > idleBefore + 1, 120_000, "idle after the script report turn");
+  const scriptMsgs = (await api<OCMessageWithParts[]>(url, `/session/${sid2}/message`)).body;
+  const scriptText = scriptMsgs.filter((m) => m.info.role === "assistant").map(textOf).join(" ");
+  ok("the script's completion started a report turn", /STEPONE/.test(scriptText) && /STEPTWO/.test(scriptText), scriptText.slice(-300));
+  process.env.OCDROID_TOOL_MODE = "direct_only";
+  await api(url, `/session/${sid2}`, { method: "DELETE" });
+
   console.log("— language of AskUser —");
   const seen = count("question.asked");
   await api(url, `/session/${sid}/prompt_async`, {
@@ -112,7 +131,7 @@ async function main(): Promise<void> {
   const shown = [q?.question, ...(q?.options ?? []).map((o) => o.label)].join(" ");
   ok("question and options are in Chinese", /[\u4e00-\u9fff]/.test(shown), shown);
   await api(url, `/question/${asked.properties.id}/reject`, { method: "POST", body: "{}" });
-  await sse.waitFor(() => idleCount() >= bgIdle + 3, 120_000, "idle after dismiss");
+  await sse.waitFor(() => idleCount() >= bgIdle + 5, 120_000, "idle after dismiss");
 
   await api(url, `/session/${sid}`, { method: "DELETE" });
   sse.stop();

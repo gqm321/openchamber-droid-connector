@@ -57,6 +57,7 @@ contrib/quota-patch/patch-openchamber-quota.sh appimage OpenChamber-1.24.2-linux
 | `OCDROID_KEY_FILE` | 存放 Factory API key 的文件,默认 `~/.config/openchamber-droid-connector/api-key` |
 | `OCDROID_DEBUG` | 设为 `1` 时把每个 HTTP 请求(方法、URL、状态码、耗时、列表条数)写入日志 |
 | `OCDROID_DEBUG_LOG` | 上述日志文件,默认系统临时目录下的 `openchamber-droid-debug.log` |
+| `OCDROID_DEBUG_NOTIFICATIONS` | 文件路径;设置后把 Droid 的每条原始通知(类型、id、适配器当时的回合状态)追加到该文件,用于排查“某段输出没有实时显示” |
 | `OCDROID_PLUGINS` | 设为 `0` 则不加载 `OPENCODE_CONFIG_CONTENT` 里的插件工具 |
 | `OCDROID_SYSTEM_APPEND` | 追加到新会话系统提示词的文字,缺省让 Droid 用用户的语言回答(含 AskUser 的问题/选项与计划正文);设为空字符串则不追加。只对新建会话生效,Droid SDK 恢复旧会话时不能设置系统提示 |
 
@@ -87,7 +88,7 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 
 ## 子智能体与便宜模型
 
-Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或自定义 droid)。适配器下它们在后台运行,Droid 会在子智能体完成后自动开一轮来汇报,这一轮会在界面里正常显示(忙碌/空闲、流式文字、工具卡片)。后台命令(`Execute` 的 fireAndForget)和后台脚本结束后触发的汇报回合同理。
+Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或自定义 droid)。适配器下它们在后台运行,Droid 会在子智能体完成后自动开一轮来汇报,这一轮会在界面里正常显示(忙碌/空闲、流式文字、工具卡片)。后台命令(`Execute` 的 fireAndForget)和后台脚本结束后触发的汇报回合同理;后台脚本运行期间,脚本里嵌套的工具调用不会让会话变成忙碌。
 
 子智能体用哪个模型只能通过配置决定,`Task` 调用本身不能临时指定模型:
 
@@ -142,7 +143,7 @@ npm run v2-smoke           # 44 项
 npm run permission-smoke   # 14 项
 npm run question-smoke     # 19 项:AskUser 与计划模式
 npm run plugin-smoke       # 8 项:OpenChamber 风格的插件工具
-npm run subagent-smoke     # 11 项:子智能体与后台命令的汇报回合、自定义 droid 的模型、AskUser 语言
+npm run subagent-smoke     # 13 项:子智能体、后台命令、后台脚本的汇报回合、自定义 droid 的模型、AskUser 语言
 npm run fork-smoke         # 17 项:从任意消息分叉
 npm run typecheck
 ```
