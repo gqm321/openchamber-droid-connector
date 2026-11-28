@@ -18,7 +18,8 @@
     "permission-smoke": "tsx contrib/permission-smoke.ts",
     "question-smoke": "tsx contrib/question-smoke.ts",
     "plugin-smoke": "tsx contrib/plugin-smoke.ts",
-    "subagent-smoke": "tsx contrib/subagent-smoke.ts"
+    "subagent-smoke": "tsx contrib/subagent-smoke.ts",
+    "fork-smoke": "tsx contrib/fork-smoke.ts"
   },
   "engines": {
     "node": ">=22"

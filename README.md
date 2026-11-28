@@ -122,12 +122,12 @@ Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或
 - 上下文用量:取 Droid 最近一次模型调用的 token 数
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
 - Droid 的 `TodoWrite` 显示为 OpenChamber 的 todo 列表,重启后可恢复
-- `/btw`:`POST /session/{id}/fork` 与会话 `metadata`
+- 分叉:`POST /session/{id}/fork`(`/btw` 与“从此处分叉”)。带 `messageID` 时,新会话只含该消息之前的对话(与 OpenCode 一致),通过 Droid 的 rewind 截断,不改动工作区文件;点的是助手消息则保留它所在的整轮;不带 `messageID` 则复制整段对话
 - 附件:图片(png/jpeg/gif/webp)、PDF、文本类文件直接交给 Droid;其他类型存到临时目录并把路径告诉模型。用户消息回显附件,重启后历史也能还原(图片的文件名 Droid 不保存,恢复后不显示)
 
 ## 已知缺口
 
-- revert、share、文件 diff 为桩实现(diff 返回 501)
+- revert(撤销/重做)、share、文件 diff 为桩实现(diff 返回 501)。Droid 的 rewind 只能生成新会话、不能在原会话里“前进”,需要回退时请用分叉(文件不会被还原)
 - 计划批准里“在新会话中执行”的选项未提供
 - `script_only` 下看不到脚本源码与 `console.log` 输出(需要给 OpenChamber 前端打补丁)
 - 子智能体自己的工作过程(子会话)在界面里不可见,只能看到 `Task` 工具卡片和最后的汇报
@@ -143,6 +143,7 @@ npm run permission-smoke   # 14 项
 npm run question-smoke     # 19 项:AskUser 与计划模式
 npm run plugin-smoke       # 8 项:OpenChamber 风格的插件工具
 npm run subagent-smoke     # 9 项:子智能体汇报回合、自定义 droid 的模型、AskUser 语言
+npm run fork-smoke         # 17 项:从任意消息分叉
 npm run typecheck
 ```
 

@@ -18,7 +18,7 @@ import { buildPluginServer, loadPluginTools } from "./plugins.js";
 import { PROVIDER_ID } from "./catalog.js";
 import { prepareAttachments, type Attachment, type PreparedAttachments } from "./attachments.js";
 import { PLAN_AGENT, getAgentName } from "./agent-name.js";
-import { COMPACTED_FALLBACK_TEXT, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, questionsOf, resultText, todosOfPart, toolMetadata } from "./droid-map.js";
+import { COMPACTED_FALLBACK_TEXT, userMessageDroidIds, compactionMessages, compactionToolPart, completeCompactionPart, latestCompactionSummary, mapTool, outerScriptId, parseDroidSessionFile, questionsOf, resultText, todosOfPart, toolMetadata } from "./droid-map.js";
 import {
   droidIdFor,
   droidSessionsMtime,
@@ -667,29 +667,29 @@ export class SessionManager {
   }
 
   /**
-   * POST /session/{id}/fork, used by OpenChamber's /btw side conversations.
-   * Droid forks the whole transcript (there is no cut point), so a `messageID`
-   * is only honoured when nothing the user said comes after it; a fork from
-   * an earlier message would silently carry later turns and is refused.
+   * POST /session/{id}/fork, used by OpenChamber's /btw side conversations and
+   * "fork from here". As in OpenCode, the new session holds the messages before
+   * `messageID`. Droid cuts there with a rewind that restores no files, so the
+   * working tree is untouched. An assistant message keeps its whole turn: the cut
+   * is at the next user message. Without a cut point the whole transcript is copied.
    * The new session is registered dormant, like one restored from disk, so
    * its first prompt starts a droid process bound to the new session.
    */
   async fork(sessionId: string, messageID?: string): Promise<OCSession> {
     const s = this.get(sessionId);
     if (s === undefined) throw new Error(`unknown session: ${sessionId}`);
-    if (messageID !== undefined) {
-      const messages = this.ensureMessages(s);
-      const at = messages.findIndex((m) => m.info.id === messageID);
-      if (at < 0) throw new Error(`unknown message: ${messageID}`);
-      if (messages.slice(at).some((m) => m.info.role === "user")) throw new Error("forking from an earlier message is not supported");
-    }
+    const cutAt = messageID === undefined ? undefined : this.droidCutPoint(s, messageID);
     // Forking through the session's own handle invalidates that handle ("replaced
     // by" the fork), which would break the parent mid-turn. A throwaway process
     // resumed on the same session forks it and leaves the parent untouched.
     const reader = await resumeSession(s.droidSessionId, {});
     let droidId: string;
     try {
-      const forked = await reader.fork({ title: this.forkTitle(s) });
+      const title = this.forkTitle(s);
+      const forked =
+        cutAt === undefined
+          ? await reader.fork({ title })
+          : (await reader.rewind({ messageId: cutAt, filesToRestore: [], filesToDelete: [], forkTitle: title })).session;
       droidId = forked.id;
       await forked.close().catch(() => undefined);
     } finally {
@@ -717,6 +717,29 @@ export class SessionManager {
     child.titleLocked = true;
     this.emit(child.info.directory, { type: "session.created", properties: { info: child.info } });
     return child.info;
+  }
+
+  /**
+   * Droid's id of the user message a fork at `messageID` has to stop before, or
+   * undefined when nothing follows the cut (the whole transcript is kept).
+   */
+  private droidCutPoint(s: ManagedSession, messageID: string): string | undefined {
+    const messages = this.ensureMessages(s);
+    const at = messages.findIndex((m) => m.info.id === messageID);
+    if (at < 0) throw new Error(`unknown message: ${messageID}`);
+    const isTyped = (m: OCMessageWithParts): boolean => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction");
+    let cut = at;
+    while (cut < messages.length && !isTyped(messages[cut]!)) cut += 1;
+    if (cut >= messages.length) return undefined;
+
+    const file = findSessionFile(s.droidSessionId, s.info.directory);
+    const droidIds = file === undefined ? [] : userMessageDroidIds(file);
+    const typed = messages.filter(isTyped);
+    const direct = droidIds.find((raw) => messages[cut]!.info.id === `msg_${raw.replace(/[^A-Za-z0-9_]/g, "_")}`);
+    if (direct !== undefined) return direct;
+    const found = droidIds[typed.indexOf(messages[cut]!)];
+    if (found === undefined || droidIds.length !== typed.length) throw new Error(`cannot map message ${messageID} to the Droid transcript`);
+    return found;
   }
 
   /** "<title> (fork #n)", numbered after the highest fork of the same title in the directory. */

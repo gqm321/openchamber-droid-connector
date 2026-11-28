@@ -315,8 +315,7 @@ export class AdapterServer {
             const message = err instanceof Error ? err.message : String(err);
             console.error(`[fork] session ${sessionId} failed:`, message);
             const missing = message.startsWith("unknown message:");
-            const refused = message.startsWith("forking from an earlier message");
-            this.json(res, missing ? 404 : refused ? 400 : 500, { name: missing ? "NotFoundError" : refused ? "BadRequest" : "UnknownError", data: { message } });
+            this.json(res, missing ? 404 : 500, { name: missing ? "NotFoundError" : "UnknownError", data: { message } });
           }
           return;
         }

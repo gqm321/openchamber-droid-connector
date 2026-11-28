@@ -337,6 +337,38 @@ function safeId(raw: string): string {
 }
 
 /**
+ * Droid's own ids for the user messages parseDroidSessionFile shows (compaction
+ * markers excluded), in order. The UI's ids are derived from them, but a message
+ * sent in the current run carries a client-made id, so callers match by position.
+ */
+export function userMessageDroidIds(path: string): string[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return [];
+  }
+  const original = new Map<string, string>();
+  for (const line of raw.split("\n")) {
+    if (line === "") continue;
+    try {
+      const e = JSON.parse(line) as FileEntry;
+      if (e.type === "message" && typeof e.id === "string") original.set(safeId(e.id), e.id);
+    } catch {
+      /* torn trailing write */
+    }
+  }
+  const shown = parseDroidSessionFile(path, "", "", "", { providerID: "", modelID: "" }, "");
+  const ids: string[] = [];
+  for (const m of shown) {
+    if (m.info.role !== "user" || m.parts.some((p) => p.type === "compaction")) continue;
+    const id = original.get(m.info.id.slice("msg_".length));
+    if (id !== undefined) ids.push(id);
+  }
+  return ids;
+}
+
+/**
  * Rebuild OpenCode messages from a Droid session file. One assistant message
  * per user turn, matching how the live bridge groups a turn. Part ids are
  * deterministic so a re-parse reconciles in the UI instead of duplicating.
