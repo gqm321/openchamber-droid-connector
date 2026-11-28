@@ -87,7 +87,7 @@ grep -c script_execution ~/.factory/sessions/<目录>/<会话>.jsonl
 
 ## 子智能体与便宜模型
 
-Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或自定义 droid)。适配器下它们在后台运行,Droid 会在子智能体完成后自动开一轮来汇报,这一轮会在界面里正常显示(忙碌/空闲、流式文字、工具卡片)。
+Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或自定义 droid)。适配器下它们在后台运行,Droid 会在子智能体完成后自动开一轮来汇报,这一轮会在界面里正常显示(忙碌/空闲、流式文字、工具卡片)。后台命令(`Execute` 的 fireAndForget)和后台脚本结束后触发的汇报回合同理。
 
 子智能体用哪个模型只能通过配置决定,`Task` 调用本身不能临时指定模型:
 
@@ -117,7 +117,7 @@ Droid 的 `Task` 工具可以启动子智能体(内置 `explorer`、`worker`,或
 - Droid 的 `AskUser` 显示为 OpenChamber 的提问卡片(单选/多选/自定义输入),回答后交还给 Droid;关闭提问相当于取消
 - 计划模式:智能体列表里的 `plan` 对应 Droid 的 spec 模式。Droid 提交计划后,以“Plan approval”提问卡片显示计划和可选的执行方式(逐项确认 / 自动执行低、中、高风险操作 / 继续修改计划);选回 `build` 即回到普通模式
 - OpenChamber 自带的工具(`openchamber`:项目/会话/定时任务;`openchamber_web`:内置浏览器面板)。适配器读取 `OPENCODE_CONFIG_CONTENT` 里的本地插件文件,把插件的工具作为 MCP 工具提供给 Droid,调用时带上会话目录。Droid 对这类工具默认会先询问权限(显示为 `mcp`),可选“总是允许”。只支持本地插件文件(`file://` 或绝对路径),不支持 npm 包名;`OCDROID_PLUGINS=0` 可关闭
-- 子智能体完成后 Droid 自动发起的汇报回合会实时显示(见上节)
+- 子智能体、后台命令、后台脚本结束后 Droid 自动发起的汇报回合会实时显示(见上节)
 - 模型切换(含推理强度)、中止(interrupt);模型列表带上下文长度、推理强度、模态信息
 - 上下文用量:取 Droid 最近一次模型调用的 token 数
 - `/compact`:压缩上下文;Droid 自己触发的自动压缩也会实时显示。摘要显示为可折叠的 `compact` 卡片,重启后历史一致
@@ -142,7 +142,7 @@ npm run v2-smoke           # 44 项
 npm run permission-smoke   # 14 项
 npm run question-smoke     # 19 项:AskUser 与计划模式
 npm run plugin-smoke       # 8 项:OpenChamber 风格的插件工具
-npm run subagent-smoke     # 9 项:子智能体汇报回合、自定义 droid 的模型、AskUser 语言
+npm run subagent-smoke     # 11 项:子智能体与后台命令的汇报回合、自定义 droid 的模型、AskUser 语言
 npm run fork-smoke         # 17 项:从任意消息分叉
 npm run typecheck
 ```

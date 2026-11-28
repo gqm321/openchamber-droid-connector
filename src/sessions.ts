@@ -58,6 +58,13 @@ type Json = Record<string, unknown>;
 
 const SCRIPT_TOOL = "Script";
 
+/**
+ * Ids of the messages Droid injects when background work ends (a sub-agent
+ * `task-completion:`, a background `execute-completion:` or `script-completion:`);
+ * each starts a turn of its own that reports on the result.
+ */
+const BACKGROUND_COMPLETION = /^(?:task|execute|script)-completion:/;
+
 /** Outcomes a handler may return without an edited spec (ProceedEdit needs one). */
 type Outcome = Exclude<ToolConfirmationOutcome, ToolConfirmationOutcome.ProceedEdit>;
 
@@ -316,20 +323,21 @@ export class SessionManager {
   }
 
   /**
-   * Sub-agents run in the background. When one finishes, Droid starts a turn of
-   * its own, started by a `task-completion:` message, to report on it. That turn
-   * never shows up in `stream()`, so it is followed through the notifications.
+   * Sub-agents, background commands and background scripts run on after the turn
+   * that started them. When one finishes, Droid starts a turn of its own, opened
+   * by a `*-completion:` message, to report on it. That turn never shows up in
+   * `stream()`, so it is followed through the notifications.
    */
   private onBackgroundNotification(s: ManagedSession, inner: Json): void {
     if (s.background === undefined) {
       const message = inner.message as Json | undefined;
-      if (inner.type !== "create_message" || typeof message?.id !== "string" || !message.id.startsWith("task-completion:")) return;
+      if (inner.type !== "create_message" || typeof message?.id !== "string" || !BACKGROUND_COMPLETION.test(message.id)) return;
       if (s.turn !== undefined || s.preparing === true) return;
       this.beginBackgroundTurn(s);
       return;
     }
     if (inner.type === "agent_turn_completed") {
-      this.endBackgroundTurn(s, inner.reason === "completed" ? "stop" : "error");
+      this.endBackgroundTurn(s, inner.reason === "error" ? "error" : "stop");
       return;
     }
     if (inner.type === "droid_working_state_changed" && inner.newState === "idle") {

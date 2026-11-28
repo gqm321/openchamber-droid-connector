@@ -87,6 +87,20 @@ async function main(): Promise<void> {
     : [];
   ok("the sub-agent ran on the droid's own model", models.includes(HELPER_MODEL), JSON.stringify(models));
 
+  console.log("— background command report turn —");
+  const bgIdle = idleCount();
+  const bgMessages = msgs.length;
+  await api(url, `/session/${sid}/prompt_async`, {
+    method: "POST",
+    body: prompt("用 Execute 工具在后台运行命令 `sleep 8; echo BGMARK`（fireAndForget 为 true），启动后不要等待，直接结束这一轮。命令结束后你会收到通知，到时在回复里写出它输出的那个词（输出在通知给出的文件里）。"),
+  });
+  await sse.waitFor(() => idleCount() >= bgIdle + 1, 120_000, "idle after starting the command");
+  await sse.waitFor(() => idleCount() >= bgIdle + 2, 120_000, "idle after the command report turn");
+  msgs = (await api<OCMessageWithParts[]>(url, `/session/${sid}/message`)).body;
+  const reported = msgs.slice(bgMessages).filter((m) => m.info.role === "assistant");
+  ok("the command's completion started a report turn", reported.length >= 2, `${reported.length} assistant messages`);
+  ok("the report mentions the output", /BGMARK/.test(reported.map(textOf).join(" ")), reported.map(textOf).join(" ").slice(0, 200));
+
   console.log("— language of AskUser —");
   const seen = count("question.asked");
   await api(url, `/session/${sid}/prompt_async`, {
@@ -98,7 +112,7 @@ async function main(): Promise<void> {
   const shown = [q?.question, ...(q?.options ?? []).map((o) => o.label)].join(" ");
   ok("question and options are in Chinese", /[\u4e00-\u9fff]/.test(shown), shown);
   await api(url, `/question/${asked.properties.id}/reject`, { method: "POST", body: "{}" });
-  await sse.waitFor(() => idleCount() >= 3, 120_000, "idle after dismiss");
+  await sse.waitFor(() => idleCount() >= bgIdle + 3, 120_000, "idle after dismiss");
 
   await api(url, `/session/${sid}`, { method: "DELETE" });
   sse.stop();
